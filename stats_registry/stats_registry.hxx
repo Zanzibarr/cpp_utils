@@ -138,7 +138,9 @@ class StatsRegistry : public TimerRegistry {
     StatsRegistry() = default;
     ~StatsRegistry() = default;
     StatsRegistry(const StatsRegistry&) = delete;
+    StatsRegistry(StatsRegistry&&) = delete;
     auto operator=(const StatsRegistry&) -> StatsRegistry& = delete;
+    auto operator=(StatsRegistry&&) -> StatsRegistry& = delete;
 
     // Default number of histogram buckets
     static constexpr std::size_t DEFAULT_HISTOGRAM_BUCKETS = 10;
@@ -475,18 +477,27 @@ class StatsRegistry : public TimerRegistry {
     // ── Counter internals ─────────────────────────────────────────────────
 
     auto get_or_create_counter(const std::string& name) -> std::atomic<int64_t>& {
+        // Fast path: counter already exists, no lock needed.
+        // unordered_map lookups are safe to do concurrently as long as no
+        // structural modifications (insert/erase) happen simultaneously.
+        // Since we only insert under the lock below, this is safe.
         {
-            // Fast read path without lock (double-checked with a shared_ptr
-            // would be nicer, but a plain mutex is fine here since creation
-            // is rare and the store is atomic).
-            std::lock_guard lock(stats_mutex_);
             auto iter = counters_.find(name);
             if (iter != counters_.end()) {
                 return *iter->second;
             }
-            counter_names_.push_back(name);
-            return *counters_.emplace(name, std::make_unique<std::atomic<int64_t>>(0)).first->second;
         }
+
+        // Slow path: counter doesn't exist, take the lock and insert.
+        std::lock_guard lock(stats_mutex_);
+        // Re-check after acquiring the lock — another thread may have inserted
+        // between the fast path check and the lock acquisition.
+        auto iter = counters_.find(name);
+        if (iter != counters_.end()) {
+            return *iter->second;
+        }
+        counter_names_.push_back(name);
+        return *counters_.emplace(name, std::make_unique<std::atomic<int64_t>>(0)).first->second;
     }
 
     void check_counter_exists(const std::string& name) const {
@@ -545,6 +556,9 @@ class StatsRegistry : public TimerRegistry {
 
     // ── Shared state ──────────────────────────────────────────────────────
 
+    // Lock ordering: if both locks are ever needed in the same code path,
+    // always acquire mutex_ (TimerRegistry) before stats_mutex_ (StatsRegistry).
+    // Currently no code path takes both simultaneously.
     mutable std::mutex stats_mutex_;  // guards all three collections below
 
     // Counters
@@ -567,6 +581,7 @@ class StatsRegistry : public TimerRegistry {
 /**
  * Increments a StatsRegistry counter on construction, decrements on destruction.
  * Useful for tracking "currently active" resources (connections, threads, etc.).
+ * The registry must outlive all ScopedCounter instances that reference it.
  */
 class ScopedCounter {
    public:
