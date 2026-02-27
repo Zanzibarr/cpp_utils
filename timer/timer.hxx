@@ -404,6 +404,7 @@ class TimerRegistry {
         auto& thr_grv = thread_graveyard_;
         thr_grv.erase(std::remove_if(thr_grv.begin(), thr_grv.end(), [&](const ThreadStatsRow& row) { return row.name == name; }), thr_grv.end());
         known_names_.erase(name);
+        known_names_order_.erase(std::remove(known_names_order_.begin(), known_names_order_.end(), name), known_names_order_.end());
     }
 
     // ── Report types ──────────────────────────────────────────────────────
@@ -444,7 +445,7 @@ class TimerRegistry {
     auto get_stats_report() const -> std::vector<StatsRow> {
         std::vector<StatsRow> result;
         std::lock_guard lock(mutex_);
-        for (const auto& name : known_names_) {
+        for (const auto& name : known_names_order_) {
             TimerStats merged;
             std::size_t thread_count = 0;
             // Count individual exited threads from the per-thread graveyard.
@@ -534,7 +535,7 @@ class TimerRegistry {
     auto get_report() const -> std::vector<std::pair<std::string, double>> {
         std::vector<std::pair<std::string, double>> result;
         std::lock_guard lock(mutex_);
-        for (const auto& name : known_names_) {
+        for (const auto& name : known_names_order_) {
             double total = 0.0;
             for (const auto& [tid, local] : live_threads_) {
                 auto iter = local->slots.find(name);
@@ -630,7 +631,10 @@ class TimerRegistry {
         }
         {
             std::lock_guard lock(mutex_);
-            known_names_.insert(name);
+            if (!known_names_.contains(name)) {
+                known_names_order_.push_back(name);
+                known_names_.insert(name);
+            }
             if (tloc.registry == nullptr) {
                 tloc.tid = std::this_thread::get_id();
                 tloc.registry = this;
@@ -743,6 +747,7 @@ class TimerRegistry {
     std::unordered_map<std::string, TimerStats> graveyard_;
     std::vector<ThreadStatsRow> thread_graveyard_;
     std::unordered_set<std::string> known_names_;
+    std::vector<std::string> known_names_order_;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
