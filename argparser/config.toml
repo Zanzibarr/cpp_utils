@@ -1,0 +1,8 @@
+# Demo config file
+[args]
+count     = 42          # overrides default of 10
+verbose   = true        # overrides default of false
+mode      = "turbo"     # overrides default of "fast"
+delimiter = '|'         # overrides default of ','
+output    = "/tmp/myapp_out.txt"
+name      = "TOML User" # satisfies the required argument
