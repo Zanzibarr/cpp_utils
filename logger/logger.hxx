@@ -273,9 +273,9 @@ class Logger {
             case level::BASIC:
                 return {.label = "       ", .color = Colors::white, .use_err = false};
             case level::DEBUG:
-                return {.label = " DEBUG ", .color = Colors::bright_blue, .use_err = false};
+                return {.label = " DEBUG ", .color = Colors::blue, .use_err = false};
             case level::INFO:
-                return {.label = "  INFO ", .color = Colors::bright_green, .use_err = false};
+                return {.label = "  INFO ", .color = Colors::bright_blue, .use_err = false};
             case level::SUCCESS:
                 return {.label = "SUCCESS", .color = Colors::bright_green, .use_err = false};
             case level::WARNING:
