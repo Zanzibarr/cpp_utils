@@ -138,7 +138,16 @@ struct Arg {
                 throw ParseError("type mismatch: expected path");
             }
             return Value{value};
+        } else if constexpr (std::is_convertible_v<T, fs::path> && !std::is_convertible_v<T, std::string>) {
+            if (type != typeid(fs::path)) {
+                throw ParseError("type mismatch: expected path");
+            }
+            return Value{fs::path{value}};
         } else if constexpr (std::is_convertible_v<T, std::string>) {
+            // Coerce to path if that's the registered type (e.g. default_val("some/path"))
+            if (type == typeid(fs::path)) {
+                return Value{fs::path{value}};
+            }
             if (type != typeid(std::string)) {
                 throw ParseError("type mismatch: expected string");
             }
