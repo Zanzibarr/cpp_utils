@@ -286,9 +286,16 @@ class TimerRegistry {
     using thread_id = std::thread::id;
 
     TimerRegistry() = default;
-    ~TimerRegistry() = default;
+    ~TimerRegistry() {
+        std::lock_guard lock(mutex_);
+        for (auto& [tid, local] : live_threads_) {
+            local->registry = nullptr;  // prevent dangling pointer access
+        }
+    }
     TimerRegistry(const TimerRegistry&) = delete;
+    TimerRegistry(TimerRegistry&&) = delete;
     auto operator=(const TimerRegistry&) -> TimerRegistry& = delete;
+    auto operator=(TimerRegistry&&) -> TimerRegistry& = delete;
 
     // ── Hot path — lock-free ──────────────────────────────────────────────
 
@@ -299,7 +306,9 @@ class TimerRegistry {
      * Stops the calling thread's timer and records the lap. O(1), lock-free.
      * @throws std::runtime_error if stop() is called before start() on this thread.
      */
-    static void stop(const std::string& name) {
+    // This function cannot be made static, otherwise the thread data would be shared across different Registry instances
+    // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+    void stop(const std::string& name) {
         auto* slot = find_slot(name);
         if ((slot == nullptr) || !slot->timer.is_running()) {
             throw std::runtime_error("stop() called before start() for timer '" + name + "' on this thread.");
@@ -631,13 +640,17 @@ class TimerRegistry {
         return tloc.slots[name];
     }
 
-    static auto find_slot(const std::string& name) -> Slot* {
+    // This function cannot be made static, otherwise the thread data would be shared across different Registry instances
+    // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+    auto find_slot(const std::string& name) const -> Slot* {
         auto& tloc = thread_local_storage();
         auto iter = tloc.slots.find(name);
         return iter != tloc.slots.end() ? &iter->second : nullptr;
     }
 
-    static auto thread_local_storage() -> ThreadLocal& {
+    // This function cannot be made static, otherwise the thread data would be shared across different Registry instances
+    // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+    auto thread_local_storage() const -> ThreadLocal& {
         thread_local ThreadLocal tloc;
         return tloc;
     }
@@ -749,7 +762,7 @@ class ScopedTimer {
     explicit ScopedTimer(std::string name, TimerRegistry& registry) : name_(std::move(name)), registry_(&registry) { registry_->start(name_); }
 
     ScopedTimer(const ScopedTimer&) = delete;
-    ScopedTimer& operator=(const ScopedTimer&) = delete;
+    auto operator=(const ScopedTimer&) -> ScopedTimer& = delete;
 
     ~ScopedTimer() noexcept {
         if (registry_ != nullptr) {
