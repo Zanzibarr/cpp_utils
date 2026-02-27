@@ -1,4 +1,4 @@
-#pragma one
+#pragma once
 
 /**
  * @file scope_guard.hxx
@@ -55,3 +55,18 @@ class ScopeGuard {
     int initial_exceptions;
     bool active{};
 };
+
+template <typename F>
+auto on_scope_exit(F&& func) {
+    return ScopeGuard<std::decay_t<F>>(std::forward<F>(func), ScopeStrategy::Exit);
+}
+
+template <typename F>
+auto on_scope_success(F&& func) {
+    return ScopeGuard<std::decay_t<F>>(std::forward<F>(func), ScopeStrategy::Success);
+}
+
+template <typename F>
+auto on_scope_fail(F&& func) {
+    return ScopeGuard<std::decay_t<F>>(std::forward<F>(func), ScopeStrategy::Fail);
+}
