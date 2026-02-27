@@ -89,10 +89,12 @@ struct Arg {
         shortName = short_name;
         return *this;
     }
+
     auto description(std::string_view description) -> Arg& {
         help = description;
         return *this;
     }
+
     auto require() -> Arg& {
         required = true;
         return *this;
@@ -100,40 +102,58 @@ struct Arg {
 
     template <typename T>
     auto default_val(T value) -> Arg& {
-        if (type != typeid(T)) {
-            throw ParseError("default value type does not match argument type");
-        }
-        defaultValue = Value{value};
+        defaultValue = normalize_and_store(value);
         return *this;
     }
 
     template <typename T>
-    auto min(T min_value) -> Arg& {
-        if (type != typeid(T)) {
-            throw ParseError("min value type does not match argument type");
-        }
-        minValue = Value{min_value};
+    auto min(T value) -> Arg& {
+        minValue = normalize_and_store(value);
         return *this;
     }
 
     template <typename T>
-    auto max(T max_value) -> Arg& {
-        if (type != typeid(T)) {
-            throw ParseError("max value type does not match argument type");
-        }
-        maxValue = Value{max_value};
+    auto max(T value) -> Arg& {
+        maxValue = normalize_and_store(value);
         return *this;
     }
 
     template <typename T>
     auto allow(std::initializer_list<T> list) -> Arg& {
-        if (type != typeid(T)) {
-            throw ParseError("allowed values type does not match argument type");
-        }
-        for (auto& value : list) {
-            choices.emplace_back(Value{value});
+        for (auto v : list) {
+            choices.emplace_back(normalize_and_store(v));
         }
         return *this;
+    }
+
+    template <typename T>
+    auto normalize_and_store(T value) -> Value {
+        if constexpr (std::is_same_v<T, bool>) {
+            if (type != typeid(bool)) {
+                throw ParseError("type mismatch: expected bool");
+            }
+            return Value{value};
+        } else if constexpr (std::is_same_v<T, fs::path>) {
+            if (type != typeid(fs::path)) {
+                throw ParseError("type mismatch: expected path");
+            }
+            return Value{value};
+        } else if constexpr (std::is_convertible_v<T, std::string>) {
+            if (type != typeid(std::string)) {
+                throw ParseError("type mismatch: expected string");
+            }
+            return Value{std::string{value}};
+        } else if constexpr (std::is_integral_v<T>) {
+            if (type == typeid(char)) {
+                return Value{static_cast<char>(value)};
+            }
+            if (type == typeid(int)) {
+                return Value{static_cast<int>(value)};
+            }
+            throw ParseError("type mismatch: expected char or int");
+        } else {
+            throw ParseError("unsupported type");
+        }
     }
 };
 
