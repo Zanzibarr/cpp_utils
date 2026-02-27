@@ -41,6 +41,7 @@
  */
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -73,6 +74,8 @@ struct Arg {
     std::string help;    // description shown in --help
     bool required = false;
 
+    std::type_index type{typeid(void)};
+
     std::optional<Value> defaultValue;
     std::optional<Value> minValue;  // inclusive, for int/char
     std::optional<Value> maxValue;  // inclusive, for int/char
@@ -80,6 +83,9 @@ struct Arg {
 
     // ── fluent builders ────────────────────────────────────────────────
     auto shorthand(char short_name) -> Arg& {
+        if (short_name == '0') {
+            throw ParseError("Cannot set 0 as short name");
+        }
         shortName = short_name;
         return *this;
     }
@@ -94,24 +100,36 @@ struct Arg {
 
     template <typename T>
     auto default_val(T value) -> Arg& {
+        if (type != typeid(T)) {
+            throw ParseError("default value type does not match argument type");
+        }
         defaultValue = Value{value};
         return *this;
     }
 
     template <typename T>
     auto min(T min_value) -> Arg& {
+        if (type != typeid(T)) {
+            throw ParseError("min value type does not match argument type");
+        }
         minValue = Value{min_value};
         return *this;
     }
 
     template <typename T>
     auto max(T max_value) -> Arg& {
+        if (type != typeid(T)) {
+            throw ParseError("max value type does not match argument type");
+        }
         maxValue = Value{max_value};
         return *this;
     }
 
     template <typename T>
     auto allow(std::initializer_list<T> list) -> Arg& {
+        if (type != typeid(T)) {
+            throw ParseError("allowed values type does not match argument type");
+        }
         for (auto& value : list) {
             choices.emplace_back(Value{value});
         }
@@ -127,11 +145,14 @@ class ArgParser {
         : programName_(std::move(programName)), description_(std::move(description)) {}
 
     // Register a new argument and return a reference for chaining
+    template <typename T>
     auto add(std::string name) -> Arg& {
         if (find_arg(name) != nullptr) {
             throw ParseError(std::format("duplicate argument registration: --{}", name));
         }
-        args_.push_back(Arg{.name = std::move(name)});
+
+        args_.push_back(Arg{.name = std::move(name), .type = typeid(T)});
+
         return args_.back();
     }
 
@@ -185,11 +206,33 @@ class ArgParser {
 
     template <typename T>
     auto get(const std::string& name) const -> T {
-        auto iter = parsed_.find(name);
-        if (iter == parsed_.end()) {
+        // 1. Find parsed value
+        auto value_it = parsed_.find(name);
+        if (value_it == parsed_.end()) {
             throw ParseError(std::format("argument not found: {}", name));
         }
-        return std::get<T>(iter->second);
+
+        // 2. Find argument descriptor
+        const Arg* arg = nullptr;
+        for (const auto& a : args_) {
+            if (a.name == name) {
+                arg = &a;
+                break;
+            }
+        }
+
+        if (!arg) {
+            throw ParseError(std::format("internal error: argument '{}' not registered", name));
+        }
+
+        // 3. Type check
+        if (arg->type != typeid(T)) {
+            throw ParseError(std::format("type mismatch for --{} (expected {}, requested by get() {})", name, type_to_string(arg->type),
+                                         type_to_string(typeid(T))));
+        }
+
+        // 4. Safe extraction
+        return std::get<T>(value_it->second);
     }
 
     // ── help ───────────────────────────────────────────────────────────
@@ -209,6 +252,8 @@ class ArgParser {
             if (arg.shortName != 0) {
                 left += std::format(", -{}", arg.shortName);
             }
+            left += std::format(" <{}>", type_to_string(arg.type));
+
             if (left.size() < HELP_COLUMN_WIDTH) {
                 left.resize(HELP_COLUMN_WIDTH, ' ');
             } else {
@@ -277,7 +322,7 @@ class ArgParser {
 
     void process_cli_value(const Arg& arg, const std::string& key, const std::vector<std::string>& remaining, std::size_t& index) {
         // bool flags may be used without a value
-        if (arg.defaultValue && std::holds_alternative<bool>(*arg.defaultValue)) {
+        if (arg.type == typeid(bool)) {
             if (index + 1 < remaining.size() && !remaining[index + 1].starts_with("-")) {
                 parsed_[key] = parse_bool(remaining[++index]);
             } else {
@@ -319,7 +364,7 @@ class ArgParser {
             // Split on first '='
             auto equal = stripped.find('=');
             if (equal == std::string::npos) {
-                continue;
+                throw ParseError(std::format("wrongly formatted line in config file: {}", stripped));
             }
 
             std::string key = trim(stripped.substr(0, equal));
@@ -335,49 +380,10 @@ class ArgParser {
                 throw ParseError(std::format("duplicate key in config file: {}", key));
             }
 
-            Value toml_value = parse_toml_value(*arg, rawVal);
+            Value toml_value = parse_value(*arg, rawVal);
             validate(*arg, toml_value);
             parsed_[key] = toml_value;
         }
-    }
-
-    // Parse a raw TOML value string given the target Arg for type inference.
-    static auto parse_toml_value(const Arg& arg, const std::string& raw) -> Value {
-        // char: single-quoted single character, e.g. 'x'
-        if (raw.size() == 3 && raw[0] == '\'' && raw[2] == '\'') {
-            return Value{raw[1]};
-        }
-
-        // string / path: double-quoted
-        if (raw.size() >= 2 && raw.front() == '"' && raw.back() == '"') {
-            std::string str = raw.substr(1, raw.size() - 2);
-            // Determine if target type is fs::path
-            if (arg.defaultValue && std::holds_alternative<fs::path>(*arg.defaultValue)) {
-                return Value{fs::path{str}};
-            }
-            if (!arg.choices.empty() && std::holds_alternative<fs::path>(arg.choices[0])) {
-                return Value{fs::path{str}};
-            }
-            return Value{str};
-        }
-
-        // bool
-        if (raw == "true" || raw == "false") {
-            return Value{raw == "true"};
-        }
-
-        // int (try to parse; fall back to string on failure)
-        try {
-            std::size_t pos = 0;
-            int int_val = std::stoi(raw, &pos);
-            if (pos == raw.size()) {
-                return Value{int_val};
-            }
-        } catch (...) {
-        }
-
-        // bare string (TOML allows unquoted strings in some contexts)
-        return Value{raw};
     }
 
     // ── string utilities ───────────────────────────────────────────────
@@ -439,34 +445,55 @@ class ArgParser {
         throw ParseError(std::format("invalid bool value: {}", str));
     }
 
-    static auto parse_value(const Arg& arg, const std::string& raw) -> Value {
-        auto infer = [&]() -> std::type_index {
-            if (arg.defaultValue) {
-                return std::visit([](auto&& visitor) -> auto { return std::type_index(typeid(visitor)); }, *arg.defaultValue);
-            }
-            if (!arg.choices.empty()) {
-                return std::visit([](auto&& visitor) -> auto { return std::type_index(typeid(visitor)); }, arg.choices[0]);
-            }
-            return typeid(std::string);
-        };
-
-        auto type_idx = infer();
-        if (type_idx == typeid(int)) {
+    template <typename T>
+    static auto convert_to_value(const std::string& raw) -> Value {
+        if constexpr (std::is_same_v<T, int>) {
             return Value{std::stoi(raw)};
-        }
-        if (type_idx == typeid(bool)) {
-            return Value{parse_bool(raw)};
-        }
-        if (type_idx == typeid(char)) {
+        } else if constexpr (std::is_same_v<T, bool>) {
+            return Value{parse_bool(raw)};  // Use your existing parse_bool
+        } else if constexpr (std::is_same_v<T, char>) {
             if (raw.size() != 1) {
-                throw ParseError("char argument must be a single character");
+                throw ParseError("Expected single character");
             }
             return Value{raw[0]};
-        }
-        if (type_idx == typeid(fs::path)) {
+        } else if constexpr (std::is_same_v<T, std::string>) {
+            return Value{raw};
+        } else if constexpr (std::is_same_v<T, fs::path>) {
             return Value{fs::path{raw}};
         }
-        return Value{raw};  // string
+        throw ParseError("Unsupported type");
+    }
+
+    static auto parse_value(const Arg& arg, const std::string& raw) -> Value {
+        // 1. Pre-process: Strip TOML-style quotes if they exist
+        std::string clean = raw;
+        if (clean.size() >= 2) {
+            if ((clean.front() == '"' && clean.back() == '"') || (clean.front() == '\'' && clean.back() == '\'')) {
+                clean = clean.substr(1, clean.size() - 2);
+            }
+        }
+
+        // 2. Convert using the template dispatcher
+        try {
+            if (arg.type == typeid(int)) {
+                return convert_to_value<int>(clean);
+            }
+            if (arg.type == typeid(bool)) {
+                return convert_to_value<bool>(clean);
+            }
+            if (arg.type == typeid(std::string)) {
+                return convert_to_value<std::string>(clean);
+            }
+            if (arg.type == typeid(char)) {
+                return convert_to_value<char>(clean);
+            }
+            if (arg.type == typeid(fs::path)) {
+                return convert_to_value<fs::path>(clean);
+            }
+        } catch (const std::exception& e) {
+            throw ParseError(std::format("Invalid value for --{}: {}", arg.name, e.what()));
+        }
+        throw ParseError("Unknown type index");
     }
 
     static void validate(const Arg& arg, const Value& val) {
@@ -514,6 +541,25 @@ class ArgParser {
             value);
     }
 
+    static auto type_to_string(std::type_index type) -> std::string {
+        if (type == typeid(int)) {
+            return "int";
+        }
+        if (type == typeid(bool)) {
+            return "bool";
+        }
+        if (type == typeid(char)) {
+            return "char";
+        }
+        if (type == typeid(std::string)) {
+            return "string";
+        }
+        if (type == typeid(fs::path)) {
+            return "path";
+        }
+        return "unknown";
+    }
+
     std::string programName_;
     std::string description_;
     std::vector<Arg> args_;
@@ -522,19 +568,14 @@ class ArgParser {
 
 }  // namespace cli
 
-/**
- * Parses CLI arguments, printing the error and help then returning 1 on failure.
- * Intended to be used directly in main():
- *
- *   ARGPARSER_PARSE(parser, argc, argv);
- */
-#define ARGPARSER_PARSE(parser, argc, argv)              \
-    do {                                                 \
-        try {                                            \
-            (parser).parse((argc), (argv));              \
-        } catch (const cli::ParseError& _e) {            \
-            std::cerr << "Error: " << _e.what() << "\n"; \
-            (parser).print_help();                       \
-            return 1;                                    \
-        }                                                \
-    } while (0)
+template <typename Parser>
+inline auto argparser_parse(Parser& parser, int argc, char* argv[]) -> bool {
+    try {
+        parser.parse(argc, argv);
+        return true;
+    } catch (const cli::ParseError& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        parser.print_help();
+        return false;
+    }
+}
