@@ -285,10 +285,10 @@ class TimerRegistry {
    public:
     using thread_id = std::thread::id;
 
-    static auto instance() -> TimerRegistry& {
-        static TimerRegistry inst;
-        return inst;
-    }
+    TimerRegistry() = default;
+    ~TimerRegistry() = default;
+    TimerRegistry(const TimerRegistry&) = delete;
+    auto operator=(const TimerRegistry&) -> TimerRegistry& = delete;
 
     // ── Hot path — lock-free ──────────────────────────────────────────────
 
@@ -571,13 +571,6 @@ class TimerRegistry {
         print_per_thread_table_(rows);
     }
 
-    TimerRegistry(const TimerRegistry&) = delete;
-    auto operator=(const TimerRegistry&) -> TimerRegistry& = delete;
-
-   protected:
-    TimerRegistry() = default;
-    ~TimerRegistry() = default;
-
    private:
     // ── Per-thread slot ───────────────────────────────────────────────────
 
@@ -775,3 +768,11 @@ class ScopedTimer {
     TimerRegistry* registry_;
     Timer timer_;
 };
+
+// For global use (as if it was singleton)
+inline auto global_timers() -> TimerRegistry& {
+    static TimerRegistry inst;
+    return inst;
+}
+
+#define TIMERS global_timers()

@@ -135,12 +135,10 @@ struct Histogram {
  */
 class StatsRegistry : public TimerRegistry {
    public:
-    // ── Singleton ─────────────────────────────────────────────────────────
-
-    static auto instance() -> StatsRegistry& {
-        static StatsRegistry inst;
-        return inst;
-    }
+    StatsRegistry() = default;
+    ~StatsRegistry() = default;
+    StatsRegistry(const StatsRegistry&) = delete;
+    auto operator=(const StatsRegistry&) -> StatsRegistry& = delete;
 
     // Default number of histogram buckets
     static constexpr std::size_t DEFAULT_HISTOGRAM_BUCKETS = 10;
@@ -474,14 +472,9 @@ class StatsRegistry : public TimerRegistry {
     }
 
    private:
-    StatsRegistry() = default;
-    ~StatsRegistry() = default;
-    StatsRegistry(const StatsRegistry&) = delete;
-    StatsRegistry& operator=(const StatsRegistry&) = delete;
-
     // ── Counter internals ─────────────────────────────────────────────────
 
-    std::atomic<int64_t>& get_or_create_counter(const std::string& name) {
+    auto get_or_create_counter(const std::string& name) -> std::atomic<int64_t>& {
         {
             // Fast read path without lock (double-checked with a shared_ptr
             // would be nicer, but a plain mutex is fine here since creation
@@ -577,15 +570,21 @@ class StatsRegistry : public TimerRegistry {
  */
 class ScopedCounter {
    public:
-    explicit ScopedCounter(std::string name, StatsRegistry& registry = StatsRegistry::instance()) : name_(std::move(name)), registry_(registry) {
-        registry_.counter_inc(name_);
-    }
+    explicit ScopedCounter(std::string name, StatsRegistry& registry) : name_(std::move(name)), registry_(registry) { registry_.counter_inc(name_); }
     ~ScopedCounter() noexcept { registry_.counter_dec(name_); }
 
     ScopedCounter(const ScopedCounter&) = delete;
-    ScopedCounter& operator=(const ScopedCounter&) = delete;
+    auto operator=(const ScopedCounter&) -> ScopedCounter& = delete;
 
    private:
     std::string name_;
     StatsRegistry& registry_;
 };
+
+// For global use (as if it was singleton)
+inline auto global_stats() -> StatsRegistry& {
+    static StatsRegistry inst;
+    return inst;
+}
+
+#define STATS global_stats()

@@ -52,7 +52,7 @@ void demo_basic_timers() {
     section("1 · Basic Timers (inherited from TimerRegistry)");
 
     // StatsRegistry IS a TimerRegistry, so every timer feature works as-is.
-    auto& reg = StatsRegistry::instance();
+    auto& reg = STATS;
 
     // ── 1a. Simple start / stop ───────────────────────────────────────────
     subsection("1a. start / stop / elapsed");
@@ -110,7 +110,7 @@ void demo_basic_timers() {
 void demo_counters() {
     section("2 · Counters");
 
-    auto& reg = StatsRegistry::instance();
+    auto& reg = STATS;
 
     // ── 2a. Basic increment / decrement ──────────────────────────────────
     subsection("2a. Increment and decrement");
@@ -154,8 +154,8 @@ void demo_counters() {
         }
     }() << "\n";
     {
-        ScopedCounter c1("active_connections");
-        ScopedCounter c2("active_connections");
+        ScopedCounter c1("active_connections", STATS);
+        ScopedCounter c2("active_connections", STATS);
         std::cout << "active_connections (2 open): " << reg.counter_get("active_connections") << "\n";
     }  // both decremented here
     std::cout << "active_connections (all closed): " << reg.counter_get("active_connections") << "\n";
@@ -191,7 +191,7 @@ void demo_counters() {
 void demo_gauges() {
     section("3 · Gauges (fractional statistics)");
 
-    auto& reg = StatsRegistry::instance();
+    auto& reg = STATS;
 
     std::mt19937 rng{42};
 
@@ -240,7 +240,7 @@ void demo_gauges() {
 void demo_histograms() {
     section("4 · Histograms (bucketed distributions)");
 
-    auto& reg = StatsRegistry::instance();
+    auto& reg = STATS;
     std::mt19937 rng{99};
 
     // ── 4a. Uniform distribution ──────────────────────────────────────────
@@ -299,7 +299,7 @@ void demo_multithreaded() {
      *   - Histogram: response time distribution
      */
 
-    auto& reg = StatsRegistry::instance();
+    auto& reg = STATS;
 
     // Create the histogram once before the threads start.
     reg.histogram_create("server.response_ms", 0.0, 300.0, 12);
@@ -321,7 +321,7 @@ void demo_multithreaded() {
 
             for (int i = 0; i < N_REQUESTS; ++i) {
                 // Track how many requests are in-flight right now.
-                ScopedCounter in_flight("server.active_requests");
+                ScopedCounter in_flight("server.active_requests", STATS);
 
                 // Time the whole request.
                 reg.start("req.handle");
@@ -384,7 +384,7 @@ void demo_multithreaded() {
 void demo_reset_erase() {
     section("6 · Reset & Erase");
 
-    auto& reg = StatsRegistry::instance();
+    auto& reg = STATS;
 
     subsection("6a. Resetting a counter back to zero");
     reg.counter_inc("scratch_counter", 99);
@@ -427,7 +427,7 @@ void demo_reset_erase() {
 
 void demo_all_reports() {
     section("7 · print_all_reports() — everything in one call");
-    StatsRegistry::instance().print_all_reports();
+    STATS.print_all_reports();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

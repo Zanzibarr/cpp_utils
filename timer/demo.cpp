@@ -110,7 +110,7 @@ void handle_request(TimerRegistry& reg) {
 void demo_registry() {
     std::cout << "── 3. TimerRegistry — single-threaded stats ─────────────────\n";
 
-    auto& reg = TimerRegistry::instance();
+    auto& reg = TIMERS;
 
     // Process 20 requests. Each stage's stats accumulate silently.
     for (int i = 0; i < 20; ++i) handle_request(reg);
@@ -137,7 +137,7 @@ void demo_registry() {
 void demo_multithreaded() {
     std::cout << "── 4. Multi-threaded registry ───────────────────────────────\n";
 
-    auto& reg = TimerRegistry::instance();
+    auto& reg = TIMERS;
     const int THREADS = 4;
     const int REQUESTS = 32;  // total, divided across threads
 
