@@ -60,7 +60,7 @@ namespace cli {
 namespace fs = std::filesystem;
 
 // Supported value types
-using Value = std::variant<int, bool, char, std::string, fs::path>;
+using Value = std::variant<int, double, bool, char, std::string, fs::path>;
 
 struct ParseError : std::runtime_error {
     using std::runtime_error::runtime_error;
@@ -144,7 +144,6 @@ struct Arg {
             }
             return Value{fs::path{value}};
         } else if constexpr (std::is_convertible_v<T, std::string>) {
-            // Coerce to path if that's the registered type (e.g. default_val("some/path"))
             if (type == typeid(fs::path)) {
                 return Value{fs::path{value}};
             }
@@ -152,6 +151,11 @@ struct Arg {
                 throw ParseError("type mismatch: expected string");
             }
             return Value{std::string{value}};
+        } else if constexpr (std::is_floating_point_v<T>) {
+            if (type != typeid(double)) {
+                throw ParseError("type mismatch: expected double");
+            }
+            return Value{static_cast<double>(value)};
         } else if constexpr (std::is_integral_v<T>) {
             if (type == typeid(char)) {
                 return Value{static_cast<char>(value)};
@@ -159,7 +163,10 @@ struct Arg {
             if (type == typeid(int)) {
                 return Value{static_cast<int>(value)};
             }
-            throw ParseError("type mismatch: expected char or int");
+            if (type == typeid(double)) {
+                return Value{static_cast<double>(value)};  // ← coerce int literals to double
+            }
+            throw ParseError("type mismatch: expected char, int, or double");
         } else {
             throw ParseError("unsupported type");
         }
@@ -487,14 +494,16 @@ class ArgParser {
             return Value{raw[0]};
         } else if constexpr (std::is_same_v<T, std::string>) {
             return Value{raw};
+        } else if constexpr (std::is_same_v<T, double>) {
+            return Value{std::stod(raw)};
         } else if constexpr (std::is_same_v<T, fs::path>) {
             return Value{fs::path{raw}};
         }
+
         throw ParseError("Unsupported type");
     }
 
     static auto parse_value(const Arg& arg, const std::string& raw) -> Value {
-        // 1. Pre-process: Strip TOML-style quotes if they exist
         std::string clean = raw;
         if (clean.size() >= 2) {
             if ((clean.front() == '"' && clean.back() == '"') || (clean.front() == '\'' && clean.back() == '\'')) {
@@ -502,7 +511,6 @@ class ArgParser {
             }
         }
 
-        // 2. Convert using the template dispatcher
         try {
             if (arg.type == typeid(int)) {
                 return convert_to_value<int>(clean);
@@ -518,6 +526,9 @@ class ArgParser {
             }
             if (arg.type == typeid(fs::path)) {
                 return convert_to_value<fs::path>(clean);
+            }
+            if (arg.type == typeid(double)) {
+                return convert_to_value<double>(clean);  // ← was missing
             }
         } catch (const std::exception& e) {
             throw ParseError(std::format("Invalid value for --{}: {}", arg.name, e.what()));
@@ -538,6 +549,15 @@ class ArgParser {
             }
             if (arg.maxValue && int_value > std::get<int>(*arg.maxValue)) {
                 throw ParseError(std::format("--{}: value {} above maximum {}", arg.name, int_value, std::get<int>(*arg.maxValue)));
+            }
+        }
+        if (std::holds_alternative<double>(val)) {
+            double double_value = std::get<double>(val);
+            if (arg.minValue && double_value < std::get<double>(*arg.minValue)) {
+                throw ParseError(std::format("--{}: value {} below minimum {}", arg.name, double_value, std::get<double>(*arg.minValue)));
+            }
+            if (arg.maxValue && double_value > std::get<double>(*arg.maxValue)) {
+                throw ParseError(std::format("--{}: value {} above maximum {}", arg.name, double_value, std::get<double>(*arg.maxValue)));
             }
         }
         if (std::holds_alternative<char>(val)) {
@@ -563,6 +583,10 @@ class ArgParser {
                     return val;
                 } else if constexpr (std::is_same_v<T, fs::path>) {
                     return val.string();
+                } else if constexpr (std::is_same_v<T, double>) {
+                    std::ostringstream oss;
+                    oss << val;
+                    return oss.str();
                 } else {
                     return std::to_string(val);
                 }
@@ -585,6 +609,9 @@ class ArgParser {
         }
         if (type == typeid(fs::path)) {
             return "path";
+        }
+        if (type == typeid(double)) {
+            return "double";
         }
         return "unknown";
     }
