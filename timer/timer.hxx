@@ -767,7 +767,9 @@ class ScopedTimer {
     explicit ScopedTimer(std::string name, TimerRegistry& registry) : name_(std::move(name)), registry_(&registry) { registry_->start(name_); }
 
     ScopedTimer(const ScopedTimer&) = delete;
+    ScopedTimer(ScopedTimer&&) = delete;
     auto operator=(const ScopedTimer&) -> ScopedTimer& = delete;
+    auto operator=(ScopedTimer&&) -> ScopedTimer& = delete;
 
     ~ScopedTimer() noexcept {
         if (registry_ != nullptr) {

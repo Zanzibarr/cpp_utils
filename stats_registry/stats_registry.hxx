@@ -589,7 +589,9 @@ class ScopedCounter {
     ~ScopedCounter() noexcept { registry_.counter_dec(name_); }
 
     ScopedCounter(const ScopedCounter&) = delete;
+    ScopedCounter(ScopedCounter&&) = delete;
     auto operator=(const ScopedCounter&) -> ScopedCounter& = delete;
+    auto operator=(ScopedCounter&&) -> ScopedCounter& = delete;
 
    private:
     std::string name_;

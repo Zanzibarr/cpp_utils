@@ -41,11 +41,9 @@ class ScopeGuard {
 
     // Boilerplate: Disable copy, enable move
     ScopeGuard(const ScopeGuard&) = delete;
+    ScopeGuard(ScopeGuard&&) = delete;
     auto operator=(const ScopeGuard&) -> ScopeGuard& = delete;
-    ScopeGuard(ScopeGuard&& other) noexcept
-        : strategy(other.strategy), func(std::move(other.func)), initial_exceptions(other.initial_exceptions), active(other.active) {
-        other.active = false;
-    }
+    auto operator=(ScopeGuard&&) -> ScopeGuard& = delete;
 
     void dismiss() noexcept { active = false; }
 

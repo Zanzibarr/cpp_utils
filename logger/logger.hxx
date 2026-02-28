@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <format>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -140,7 +141,9 @@ class Logger {
     }
 
     Logger(const Logger &) = delete;
+    Logger(Logger &&) = delete;
     auto operator=(const Logger &) -> Logger & = delete;
+    auto operator=(Logger &&) -> Logger & = delete;
 
     // ── Initialization ────────────────────────────────────────────────────────
 
@@ -300,9 +303,7 @@ class Logger {
         int seconds = (total_ms % MS_PER_MINUTE) / MS_PER_SECOND;
         int millis = total_ms % MS_PER_SECOND;
 
-        char buf[TIME_BUFFER_SIZE];
-        std::snprintf(buf, sizeof(buf), "%02d:%02d:%02d.%03d", hours, minutes, seconds, millis);
-        return buf;
+        return std::format("{:02}:{:02}:{:02}.{:03}", hours, minutes, seconds, millis);
     }
 
     // ── Thread ID formatting ──────────────────────────────────────────────────

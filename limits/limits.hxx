@@ -97,7 +97,9 @@ class GlobalTimeLimiter {
     ~GlobalTimeLimiter() { cancel(); }
 
     GlobalTimeLimiter(const GlobalTimeLimiter&) = delete;
+    GlobalTimeLimiter(GlobalTimeLimiter&&) = delete;
     auto operator=(const GlobalTimeLimiter&) -> GlobalTimeLimiter& = delete;
+    auto operator=(GlobalTimeLimiter&&) -> GlobalTimeLimiter& = delete;
 
     void set(std::chrono::seconds duration, Callback on_expire = nullptr) {
         cancel();

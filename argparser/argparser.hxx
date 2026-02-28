@@ -49,6 +49,7 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <typeindex>
@@ -120,8 +121,8 @@ struct Arg {
 
     template <typename T>
     auto allow(std::initializer_list<T> list) -> Arg& {
-        for (auto v : list) {
-            choices.emplace_back(normalize_and_store(v));
+        for (auto val : list) {
+            choices.emplace_back(normalize_and_store(val));
         }
         return *this;
     }
@@ -249,21 +250,21 @@ class ArgParser {
         }
 
         // 2. Find argument descriptor
-        const Arg* arg = nullptr;
-        for (const auto& a : args_) {
-            if (a.name == name) {
-                arg = &a;
+        const Arg* argument = nullptr;
+        for (const auto& arg : args_) {
+            if (arg.name == name) {
+                argument = &arg;
                 break;
             }
         }
 
-        if (!arg) {
+        if (!argument) {
             throw ParseError(std::format("internal error: argument '{}' not registered", name));
         }
 
         // 3. Type check
-        if (arg->type != typeid(T)) {
-            throw ParseError(std::format("type mismatch for --{} (expected {}, requested by get() {})", name, type_to_string(arg->type),
+        if (argument->type != typeid(T)) {
+            throw ParseError(std::format("type mismatch for --{} (expected {}, requested by get() {})", name, type_to_string(argument->type),
                                          type_to_string(typeid(T))));
         }
 
