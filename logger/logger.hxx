@@ -295,7 +295,6 @@ class Logger {
         constexpr int MS_PER_SECOND = 1000;
         constexpr int MS_PER_MINUTE = 60000;
         constexpr int MS_PER_HOUR = 3600000;
-        constexpr int TIME_BUFFER_SIZE = 32;
 
         int total_ms = static_cast<int>(elapsed * MS_PER_SECOND);
         int hours = total_ms / MS_PER_HOUR;
