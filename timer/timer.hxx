@@ -461,6 +461,43 @@ class TimerRegistry {
     };
 
     // ── Report accessors ──────────────────────────────────────────────────
+    /**
+     * Returns a simple elapsed-time report — one value per name, summed across
+     * all live threads and exited threads (graveyard).
+     * Useful for a quick overview without the full Welford stats table.
+     */
+    template <timer_detail::ValidDuration D = std::chrono::milliseconds>
+    auto get_report() const -> std::vector<std::pair<std::string, double>> {
+        std::vector<std::pair<std::string, double>> result;
+        std::lock_guard lock(mutex_);
+
+        for (const auto& name : known_names_order_) {
+            double total = 0.0;
+
+            // Exited threads — already summed into graveyard_
+            auto iter = graveyard_.find(name);
+            if (iter != graveyard_.end()) {
+                total += timer_detail::ns_to<D>(iter->second.total);
+            }
+
+            // Live threads — find the slot index for this name, then sum
+            for (std::size_t i = 0; i < MAX_CT_TIMERS; ++i) {
+                if (ct_names_[i] != name) {
+                    continue;
+                }
+                for (const auto& [tid, local] : live_threads_) {
+                    if (!local->ct_active[i]) {
+                        continue;
+                    }
+                    total += local->ct_slots[i].timer.elapsed<D>();
+                }
+                break;  // name is unique across slots, no need to keep scanning
+            }
+
+            result.emplace_back(name, total);
+        }
+        return result;
+    }
 
     /**
      * Returns a merged report — one row per name, stats aggregated across all
@@ -556,6 +593,32 @@ class TimerRegistry {
             }
         }
         return result;
+    }
+
+    /**
+     * Prints the simple elapsed-time report — one line per timer name.
+     *
+     * Example output:
+     *   db_query:    42.31 ms
+     *   render:     120.07 ms
+     */
+    template <timer_detail::ValidDuration D = std::chrono::milliseconds>
+    void print_report() const {
+        const auto rows = get_report<D>();
+        if (rows.empty()) {
+            return;
+        }
+
+        // Find the longest name for alignment
+        std::size_t name_width = 0;
+        for (const auto& [name, _] : rows) {
+            name_width = std::max(name_width, name.size());
+        }
+
+        for (const auto& [name, value] : rows) {
+            std::cout << std::left << std::setw(static_cast<int>(name_width)) << name << std::right << std::setw(10) << std::fixed
+                      << std::setprecision(2) << value << "  " << timer_detail::unit_name<D>() << "\n";
+        }
     }
 
     /**
