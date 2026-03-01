@@ -3,7 +3,7 @@
 /**
  * @file timer.hxx
  * @brief Timer class and related utilities (ScopedTimer and TimerRegistry)
- * @version 1.0.0
+ * @version 2.0.0
  *
  * @author Matteo Zanella <matteozanella2@gmail.com>
  * Copyright 2026 Matteo Zanella
@@ -12,6 +12,8 @@
  */
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <functional>
@@ -20,13 +22,14 @@
 #include <limits>
 #include <mutex>
 #include <sstream>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#include "../ct_string/ct_string.hxx"  // TODO: ← adjust to wherever ct_string lives
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
@@ -92,17 +95,22 @@ inline auto pick_unit(double min_ns) -> UnitSpec {
 
 template <typename Row>
 auto col_min(const std::vector<Row>& rows, std::function<double(const Row&)> func) -> double {
-    double max = std::numeric_limits<double>::max();
+    double best = std::numeric_limits<double>::max();
     for (const auto& row : rows) {
         double val = func(row);
         if (val > 0.0) {
-            max = std::min(max, val);
+            best = std::min(best, val);
         }
     }
-    return (max == std::numeric_limits<double>::max()) ? 1.0 : max;
+    return (best == std::numeric_limits<double>::max()) ? 1.0 : best;
 }
 
 }  // namespace timer_detail
+
+template <std::size_t Hash>
+struct CtSlotID {
+    static const std::size_t value;
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Timer
@@ -266,24 +274,58 @@ struct TimerStats {
 /**
  * A registry for managing multiple named timers across threads.
  *
+ * All timer names are compile-time ct_string template parameters.
+ * Lookup is O(1) array indexing — no string hashing or map search at runtime.
+ *
  * Performance design
  * ──────────────────
- * The hot path (start / stop / elapsed / is_running) is entirely lock-free:
- * each thread owns thread_local storage and never touches shared state.
- * The registry mutex is only acquired when:
- *   - A thread calls start() on a name for the very first time (registers itself).
- *   - reset() or erase() is called.
+ * The hot path (start<n> / stop / elapsed<n> / is_running<n>) is entirely
+ * lock-free after the first call per name per thread. The registry mutex is
+ * only acquired when:
+ *   - A thread uses a name for the very first time (registers the ct slot).
+ *   - reset<n>() is called.
  *   - A report is requested.
  *   - A thread exits (snapshots its stats into the graveyard).
  *
- * Thread lifetime
+ * Preferred usage
  * ───────────────
- * When a thread exits, its thread_local destructor merges its final stats into
- * a per-name graveyard so no data is lost even if threads exit before reporting.
+ *   One-liner RAII — name resolved at compile time, stop is a pointer deref:
+ *   auto t = make_scoped_timer<"db_query">(reg);
+ *
+ *   Manual handle-based (lowest possible overhead):
+ *   auto* slot = reg.start<"db_query">();
+ *   ... work ...
+ *   reg.stop(slot);
  */
 class TimerRegistry {
    public:
     using thread_id = std::thread::id;
+
+    // ── Per-thread slot — public so make_scoped_timer can cache the pointer ──
+    struct Slot {
+        Timer timer;
+        TimerStats stats;
+    };
+
+    // ── Compile-time timer limit ──────────────────────────────────────────────
+    // Maximum number of distinct compile-time timer names across the whole
+    // program. Raise if you hit the abort() in assign_id().
+    static constexpr std::size_t MAX_CT_TIMERS = 128;
+
+    /**
+     * Assigns a unique sequential slot index to a hash at static-init time.
+     * Called once per unique ct_string instantiation via CtSlotID<H>::value.
+     * Thread-safe: uses a static atomic counter.
+     */
+    static auto assign_id(std::size_t /*hash*/) -> std::size_t {
+        static std::atomic<std::size_t> next{0};
+        std::size_t slot_id = next.fetch_add(1, std::memory_order_relaxed);
+        if (slot_id >= MAX_CT_TIMERS) {
+            std::cerr << "TimerRegistry: MAX_CT_TIMERS (" << MAX_CT_TIMERS << ") exceeded. Increase the limit.\n";
+            std::abort();
+        }
+        return slot_id;
+    }
 
     TimerRegistry() = default;
     ~TimerRegistry() {
@@ -297,114 +339,97 @@ class TimerRegistry {
     auto operator=(const TimerRegistry&) -> TimerRegistry& = delete;
     auto operator=(TimerRegistry&&) -> TimerRegistry& = delete;
 
-    // ── Hot path — lock-free ──────────────────────────────────────────────
-
-    /** Starts the calling thread's timer for the given name. O(1), lock-free after first call. */
-    void start(const std::string& name) { get_or_create_slot(name).timer.start(); }
+    // ── Hot path — compile-time API, O(1) array lookup ────────────────────
 
     /**
-     * Stops the calling thread's timer and records the lap. O(1), lock-free.
-     * @throws std::runtime_error if stop() is called before start() on this thread.
+     * Starts the calling thread's timer for the compile-time name.
+     * Returns a Slot* handle — pass to stop(Slot*) to skip even the array
+     * lookup on the stop side.
+     *
+     *   auto* slot = reg.start<"db_query">();
+     *   ... work ...
+     *   reg.stop(slot);
      */
-    // This function cannot be made static, otherwise the thread data would be shared across different Registry instances
-    // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
-    void stop(const std::string& name) {
-        auto* slot = find_slot(name);
-        if ((slot == nullptr) || !slot->timer.is_running()) {
-            throw std::runtime_error("stop() called before start() for timer '" + name + "' on this thread.");
-        }
+    template <ct_string Name>
+    auto start() -> Slot* {
+        constexpr std::size_t hash = hash_name(Name);
+        auto& slot = ct_get_or_create_slot<hash, Name>();
+        slot.timer.start();
+        return &slot;
+    }
+
+    /**
+     * Stops via a Slot* handle returned by start<n>() — no lookup at all, O(1).
+     * This is the preferred stop path and is used internally by make_scoped_timer.
+     */
+    static void stop(Slot* slot) noexcept {
         slot->timer.stop();
         slot->stats.record(slot->timer.last_lap_ns());
     }
 
-    /** Returns true if the calling thread's timer is running. O(1), lock-free. */
-    auto is_running(const std::string& name) const -> bool {
-        const auto* slot = find_slot(name);
-        if (slot == nullptr) {
-            throw_slot_missing_(name);
-        }
-        return slot->timer.is_running();
+    /**
+     * Stops a compile-time named timer by name — single array index lookup.
+     * Prefer stop(Slot*) in tight loops; use this for readability elsewhere.
+     */
+    template <ct_string Name>
+    void stop() {
+        const std::size_t slot_id = CtSlotID<hash_name(Name)>::value;
+        stop(&thread_local_storage().ct_slots[slot_id]);
     }
 
-    /** Elapsed time for the calling thread's timer. O(1), lock-free. */
-    template <timer_detail::ValidDuration D = std::chrono::milliseconds>
-    auto elapsed(const std::string& name) const -> double {
-        const auto* slot = find_slot(name);
-        if (!slot) {
-            throw_slot_missing_(name);
-        }
-        return slot->timer.elapsed<D>();
+    /**
+     * Returns true if the calling thread's timer for Name is currently running.
+     * O(1), lock-free.
+     */
+    template <ct_string Name>
+    [[nodiscard]] auto is_running() const -> bool {
+        const std::size_t slot_id = CtSlotID<hash_name(Name)>::value;
+        return thread_local_storage().ct_slots[slot_id].timer.is_running();
     }
-    auto elapsed_ns(const std::string& n) const -> double { return elapsed<std::chrono::nanoseconds>(n); }
-    auto elapsed_us(const std::string& n) const -> double { return elapsed<std::chrono::microseconds>(n); }
-    auto elapsed_ms(const std::string& n) const -> double { return elapsed<std::chrono::milliseconds>(n); }
-    auto elapsed_s(const std::string& n) const -> double { return elapsed<std::chrono::seconds>(n); }
 
-    /** Returns a copy of the calling thread's stats for the given name. Lock-free. */
-    auto stats(const std::string& name) const -> TimerStats {
-        const auto* slot = find_slot(name);
-        if (slot == nullptr) {
-            throw_slot_missing_(name, true);
-        }
-        return slot->stats;
+    /**
+     * Returns elapsed time for the calling thread's timer for Name.
+     * O(1), lock-free.
+     */
+    template <ct_string Name, timer_detail::ValidDuration D = std::chrono::milliseconds>
+    [[nodiscard]] auto elapsed() const -> double {
+        const std::size_t slot_id = CtSlotID<hash_name(Name)>::value;
+        return thread_local_storage().ct_slots[slot_id].timer.elapsed<D>();
+    }
+
+    /**
+     * Returns a copy of the calling thread's accumulated stats for Name.
+     * O(1), lock-free.
+     */
+    template <ct_string Name>
+    [[nodiscard]] auto stats() const -> TimerStats {
+        const std::size_t slot_id = CtSlotID<hash_name(Name)>::value;
+        return thread_local_storage().ct_slots[slot_id].stats;
     }
 
     // ── Slow path — acquires mutex ────────────────────────────────────────
 
     /**
-     * Returns true if any live thread's timer for the given name is running.
-     * @throws std::runtime_error if the name has never been started.
+     * Resets all threads' timers and stats for Name.
+     * The name remains registered; start<n>() can be called again immediately.
      */
-    auto any_running(const std::string& name) const -> bool {
+    template <ct_string Name>
+    void reset() {
+        const std::size_t slot_id = CtSlotID<hash_name(Name)>::value;
         std::lock_guard lock(mutex_);
-        check_name_exists_locked(name);
-        return std::ranges::any_of(live_threads_, [&](const auto& pair) {
-            auto iter = pair.second->slots.find(name);
-            return iter != pair.second->slots.end() && iter->second.timer.is_running();
-        });
-    }
-
-    /**
-     * Resets all threads' timers and stats for the given name (global, symmetric with erase).
-     * The name remains registered; any thread can call start() again immediately.
-     * @throws std::runtime_error if the name has never been started.
-     */
-    void reset(const std::string& name) {
-        std::lock_guard lock(mutex_);
-        check_name_exists_locked(name);
         for (auto& [tid, local] : live_threads_) {
-            auto iter = local->slots.find(name);
-            if (iter != local->slots.end()) {
-                iter->second.timer.reset();
-                iter->second.stats.reset();
+            if (!local->ct_active[slot_id]) {
+                continue;
             }
+            local->ct_slots[slot_id].timer.reset();
+            local->ct_slots[slot_id].stats.reset();
         }
-        if (graveyard_.contains(name)) {
+        const auto& name = ct_names_[slot_id];
+        if (!name.empty() && graveyard_.contains(name)) {
             graveyard_[name].reset();
         }
         auto& thr_grv = thread_graveyard_;
         thr_grv.erase(std::remove_if(thr_grv.begin(), thr_grv.end(), [&](const ThreadStatsRow& row) { return row.name == name; }), thr_grv.end());
-    }
-
-    /**
-     * Erases all threads' timers, stats, and the name itself from the registry.
-     * @throws std::runtime_error if the name has never been started.
-     */
-    void erase(const std::string& name) {
-        // Remove the calling thread's own slot first (no mutex needed for own storage).
-        auto& tloc = thread_local_storage();
-        tloc.slots.erase(name);
-        // Remove all other threads' slots, the graveyard entry, and the name itself.
-        std::lock_guard lock(mutex_);
-        check_name_exists_locked(name);
-        for (auto& [tid, local] : live_threads_) {
-            local->slots.erase(name);
-        }
-        graveyard_.erase(name);
-        auto& thr_grv = thread_graveyard_;
-        thr_grv.erase(std::remove_if(thr_grv.begin(), thr_grv.end(), [&](const ThreadStatsRow& row) { return row.name == name; }), thr_grv.end());
-        known_names_.erase(name);
-        known_names_order_.erase(std::remove(known_names_order_.begin(), known_names_order_.end(), name), known_names_order_.end());
     }
 
     // ── Report types ──────────────────────────────────────────────────────
@@ -466,10 +491,14 @@ class TimerRegistry {
             }
             // Add live threads.
             for (const auto& [tid, local] : live_threads_) {
-                auto iter = local->slots.find(name);
-                if (iter != local->slots.end() && iter->second.stats.count > 0) {
-                    merged.merge(iter->second.stats);
-                    ++thread_count;
+                for (std::size_t i = 0; i < MAX_CT_TIMERS; ++i) {
+                    if (!local->ct_active[i] || ct_names_[i] != name) {
+                        continue;
+                    }
+                    if (local->ct_slots[i].stats.count > 0) {
+                        merged.merge(local->ct_slots[i].stats);
+                        ++thread_count;
+                    }
                 }
             }
             if (merged.count == 0) {
@@ -490,7 +519,6 @@ class TimerRegistry {
         return result;
     }
 
-    /** Returns a per-thread report — one row per (name, thread_id) pair for live threads. */
     template <timer_detail::ValidDuration D = std::chrono::milliseconds>
     auto get_stats_report_per_thread() const -> std::vector<ThreadStatsRow> {
         std::vector<ThreadStatsRow> result;
@@ -509,13 +537,13 @@ class TimerRegistry {
             });
         }
         for (const auto& [tid, local] : live_threads_) {
-            for (const auto& [name, slot] : local->slots) {
-                if (slot.stats.count == 0) {
+            for (std::size_t i = 0; i < MAX_CT_TIMERS; ++i) {
+                if (!local->ct_active[i] || local->ct_slots[i].stats.count == 0) {
                     continue;
                 }
-                const auto& stats = slot.stats;
+                const auto& stats = local->ct_slots[i].stats;
                 result.push_back({
-                    name,
+                    ct_names_[i],
                     tid,
                     stats.count,
                     stats.get_total<D>(),
@@ -528,32 +556,6 @@ class TimerRegistry {
             }
         }
         return result;
-    }
-
-    /** Returns a simple elapsed-time report — one value per name, summed across live threads. */
-    template <timer_detail::ValidDuration D = std::chrono::milliseconds>
-    auto get_report() const -> std::vector<std::pair<std::string, double>> {
-        std::vector<std::pair<std::string, double>> result;
-        std::lock_guard lock(mutex_);
-        for (const auto& name : known_names_order_) {
-            double total = 0.0;
-            for (const auto& [tid, local] : live_threads_) {
-                auto iter = local->slots.find(name);
-                if (iter != local->slots.end()) {
-                    total += iter->second.timer.elapsed<D>();
-                }
-            }
-            result.emplace_back(name, total);
-        }
-        return result;
-    }
-
-    /** Prints the simple elapsed-time report. */
-    template <timer_detail::ValidDuration D = std::chrono::milliseconds>
-    void print_report() const {
-        for (const auto& [name, value] : get_report<D>()) {
-            std::cout << name << ": " << value << " " << timer_detail::unit_name<D>() << "\n";
-        }
     }
 
     /**
@@ -582,16 +584,13 @@ class TimerRegistry {
     }
 
    private:
-    // ── Per-thread slot ───────────────────────────────────────────────────
-
-    struct Slot {
-        Timer timer;
-        TimerStats stats;
-    };
-
     struct ThreadLocal {
         thread_id tid;
-        std::unordered_map<std::string, Slot> slots;
+
+        // Compile-time slots — fixed array, indexed by CtSlotID::value.
+        std::array<Slot, TimerRegistry::MAX_CT_TIMERS> ct_slots;
+        std::array<bool, TimerRegistry::MAX_CT_TIMERS> ct_active{};
+
         TimerRegistry* registry = nullptr;
 
         ~ThreadLocal() {
@@ -599,57 +598,43 @@ class TimerRegistry {
                 return;
             }
             std::lock_guard lock(registry->mutex_);
-            for (const auto& [name, slot] : slots) {
-                if (slot.stats.count == 0) {
+            for (std::size_t i = 0; i < ct_active.size(); ++i) {
+                if (!ct_active[i] || ct_slots[i].stats.count == 0) {
                     continue;
                 }
-                registry->graveyard_[name].merge(slot.stats);
-                const auto& stats = slot.stats;
-                registry->thread_graveyard_.push_back({
-                    name,
-                    tid,
-                    stats.count,
-                    stats.total,
-                    stats.mean,
-                    stats.min,
-                    stats.max,
-                    stats.stddev(),
-                    stats.sample_stddev(),
-                });
+                const auto& name = registry->ct_names_[i];
+                registry->graveyard_[name].merge(ct_slots[i].stats);
+                const auto& s = ct_slots[i].stats;
+                registry->thread_graveyard_.push_back({name, tid, s.count, s.total, s.mean, s.min, s.max, s.stddev(), s.sample_stddev()});
             }
             registry->live_threads_.erase(tid);
         }
     };
 
-    // ── Hot-path slot access ──────────────────────────────────────────────
+    // ── Compile-time slot creation ────────────────────────────────────────
 
-    auto get_or_create_slot(const std::string& name) -> Slot& {
+    template <std::size_t Hash, ct_string Name>
+    auto ct_get_or_create_slot() -> Slot& {
+        const std::size_t id = CtSlotID<Hash>::value;
         auto& tloc = thread_local_storage();
-        auto iter = tloc.slots.find(name);
-        if (iter != tloc.slots.end()) {
-            return iter->second;
-        }
-        {
+
+        if (!tloc.ct_active[id]) {
             std::lock_guard lock(mutex_);
-            if (!known_names_.contains(name)) {
-                known_names_order_.push_back(name);
-                known_names_.insert(name);
+            if (ct_names_[id].empty()) {
+                ct_names_[id] = std::string(Name.view());
+                if (!known_names_.contains(ct_names_[id])) {
+                    known_names_.emplace(ct_names_[id]);
+                    known_names_order_.push_back(ct_names_[id]);
+                }
             }
             if (tloc.registry == nullptr) {
                 tloc.tid = std::this_thread::get_id();
                 tloc.registry = this;
                 live_threads_[tloc.tid] = &tloc;
             }
+            tloc.ct_active[id] = true;
         }
-        return tloc.slots[name];
-    }
-
-    // This function cannot be made static, otherwise the thread data would be shared across different Registry instances
-    // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
-    auto find_slot(const std::string& name) const -> Slot* {
-        auto& tloc = thread_local_storage();
-        auto iter = tloc.slots.find(name);
-        return iter != tloc.slots.end() ? &iter->second : nullptr;
+        return tloc.ct_slots[id];
     }
 
     // This function cannot be made static, otherwise the thread data would be shared across different Registry instances
@@ -657,29 +642,6 @@ class TimerRegistry {
     auto thread_local_storage() const -> ThreadLocal& {
         thread_local ThreadLocal tloc;
         return tloc;
-    }
-
-    // ── Helpers ───────────────────────────────────────────────────────────
-
-    void check_name_exists_locked(const std::string& name) const {
-        if (!known_names_.contains(name)) {
-            throw std::runtime_error("Timer '" + name + "' does not exist in the registry.");
-        }
-    }
-
-    // Called on the hot path when find_slot returns nullptr. Distinguishes between
-    // "name never existed / was erased" (does not exist) and "name exists but this
-    // thread never called start()" (no entry for the calling thread).
-    // Takes the mutex only to read known_names_ — this only runs in the error path.
-    [[noreturn]] void throw_slot_missing_(const std::string& name, bool is_stats = false) const {
-        std::lock_guard lock(mutex_);
-        if (!known_names_.contains(name)) {
-            throw std::runtime_error("Timer '" + name + "' does not exist in the registry.");
-        }
-        if (is_stats) {
-            throw std::runtime_error("Timer '" + name + "' has no stats for the calling thread.");
-        }
-        throw std::runtime_error("Timer '" + name + "' has no entry for the calling thread.");
     }
 
     // ── Print helpers ─────────────────────────────────────────────────────
@@ -691,7 +653,6 @@ class TimerRegistry {
         auto [dm, um] = pick_unit(cmin([](const auto& row) { return row.mean; }));
         auto [di, ui] = pick_unit(cmin([](const auto& row) { return row.min; }));
         auto [dx, ux] = pick_unit(cmin([](const auto& row) { return row.max; }));
-        auto [ds, us] = pick_unit(cmin([](const auto& row) { return row.stddev > 0 ? row.stddev : std::numeric_limits<double>::max(); }));
 
         constexpr int NAME_WIDTH = 24;
         constexpr int THREAD_WIDTH = 9;
@@ -701,13 +662,13 @@ class TimerRegistry {
         auto hdr = [](const char* key, const char* unit) -> std::string { return std::string(key) + "(" + unit + ")"; };
         std::cout << std::left << std::setw(NAME_WIDTH) << "Timer" << std::right << std::setw(THREAD_WIDTH) << "Threads" << std::setw(THREAD_WIDTH)
                   << "Calls" << std::setw(VALUE_WIDTH) << hdr("Total", ut) << std::setw(VALUE_WIDTH) << hdr("Mean", um) << std::setw(VALUE_WIDTH)
-                  << hdr("Min", ui) << std::setw(VALUE_WIDTH) << hdr("Max", ux) << std::setw(VALUE_WIDTH) << hdr("Stddev", us) << "\n"
+                  << hdr("Min", ui) << std::setw(VALUE_WIDTH) << hdr("Max", ux) << std::setw(VALUE_WIDTH) << hdr("Stddev", um) << "\n"
                   << std::string(NAME_WIDTH + (THREAD_WIDTH * THREAD_COLUMNS) + (VALUE_WIDTH * VALUE_COLUMNS), '-') << "\n";
         for (const auto& row : rows) {
             std::cout << std::left << std::setw(NAME_WIDTH) << row.name << std::right << std::setw(THREAD_WIDTH) << row.thread_count
                       << std::setw(THREAD_WIDTH) << row.call_count << std::fixed << std::setprecision(2) << std::setw(VALUE_WIDTH) << row.total / dt
                       << std::setw(VALUE_WIDTH) << row.mean / dm << std::setw(VALUE_WIDTH) << row.min / di << std::setw(VALUE_WIDTH) << row.max / dx
-                      << std::setw(VALUE_WIDTH) << row.stddev / ds << "\n";
+                      << std::setw(VALUE_WIDTH) << row.stddev / dm << "\n";
         }
     }
 
@@ -748,48 +709,84 @@ class TimerRegistry {
     std::vector<ThreadStatsRow> thread_graveyard_;
     std::unordered_set<std::string> known_names_;
     std::vector<std::string> known_names_order_;
+
+    // Maps compile-time slot IDs back to their string names (for reporting).
+    // Written once at first use, read-only after that.
+    std::array<std::string, MAX_CT_TIMERS> ct_names_;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ScopedTimer
+// CtSlotID<Hash> — maps a compile-time hash to a unique sequential slot index.
+//
+// The static member `value` is initialised exactly once at program startup
+// via TimerRegistry::assign_id(). Every translation unit that uses
+// start<"name">() will instantiate this template for that name's hash,
+// ensuring a consistent ID across the whole program.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * RAII timer: starts on construction, stops on destruction.
- * When backed by a registry the hot path is lock-free (thread_local storage).
- * When standalone iter prints name + elapsed to stdout on destruction.
- */
+template <std::size_t Hash>
+const std::size_t CtSlotID<Hash>::value = TimerRegistry::assign_id(Hash);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// make_scoped_timer — primary RAII entry point for registry-backed timers
+//
+// Construction calls start<n>() — O(1) array lookup after the first call per
+// name per thread. Destruction calls stop(Slot*) — a single pointer
+// dereference, no lookup of any kind.
+//
+// Usage:
+//   auto t = make_scoped_timer<"db_query">(reg);
+// ─────────────────────────────────────────────────────────────────────────────
+
+template <ct_string Name, timer_detail::ValidDuration D = std::chrono::milliseconds>
+[[nodiscard]] auto make_scoped_timer(TimerRegistry& reg) {
+    struct CtScopedTimer {
+        TimerRegistry* registry_;
+        TimerRegistry::Slot* slot_;
+
+        explicit CtScopedTimer(TimerRegistry& r) : registry_(&r), slot_(r.template start<Name>()) {}
+
+        ~CtScopedTimer() noexcept { registry_->stop(slot_); }
+
+        CtScopedTimer(const CtScopedTimer&) = delete;
+        CtScopedTimer(CtScopedTimer&&) = delete;
+        auto operator=(const CtScopedTimer&) -> CtScopedTimer& = delete;
+        auto operator=(CtScopedTimer&&) -> CtScopedTimer& = delete;
+    };
+    return CtScopedTimer{reg};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ScopedTimer — standalone (no-registry) RAII timer
+//
+// Prints "name: elapsed unit\n" to stdout on destruction.
+// For registry-backed timing use make_scoped_timer<"name">(reg) instead.
+// ─────────────────────────────────────────────────────────────────────────────
+
 template <timer_detail::ValidDuration D = std::chrono::milliseconds>
 class ScopedTimer {
    public:
-    explicit ScopedTimer(std::string name) : name_(std::move(name)), registry_(nullptr) { timer_.start(); }
+    explicit ScopedTimer(std::string name) : name_(std::move(name)) { timer_.start(); }
 
-    explicit ScopedTimer(std::string name, TimerRegistry& registry) : name_(std::move(name)), registry_(&registry) { registry_->start(name_); }
+    ~ScopedTimer() noexcept {
+        timer_.stop();
+        std::cout << name_ << ": " << timer_.elapsed<D>() << " " << timer_detail::unit_name<D>() << "\n";
+    }
 
     ScopedTimer(const ScopedTimer&) = delete;
     ScopedTimer(ScopedTimer&&) = delete;
     auto operator=(const ScopedTimer&) -> ScopedTimer& = delete;
     auto operator=(ScopedTimer&&) -> ScopedTimer& = delete;
 
-    ~ScopedTimer() noexcept {
-        if (registry_ != nullptr) {
-            try {
-                registry_->stop(name_);
-            } catch (...) {
-            }
-        } else {
-            timer_.stop();
-            std::cout << name_ << ": " << timer_.elapsed<D>() << " " << timer_detail::unit_name<D>() << "\n";
-        }
-    }
-
    private:
     std::string name_;
-    TimerRegistry* registry_;
     Timer timer_;
 };
 
-// For global use (as if it was singleton)
+// ─────────────────────────────────────────────────────────────────────────────
+// Global convenience
+// ─────────────────────────────────────────────────────────────────────────────
+
 inline auto global_timers() -> TimerRegistry& {
     static TimerRegistry inst;
     return inst;

@@ -2,8 +2,8 @@
 
 /**
  * @file stats_registry.hxx
- * @brief Statistics registry to complement the Timer Registry class
- * @version 1.0.0
+ * @brief Statistics registry to complement the TimerRegistry class
+ * @version 2.0.0
  *
  * @author Matteo Zanella <matteozanella2@gmail.com>
  * Copyright 2026 Matteo Zanella
@@ -12,6 +12,7 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cmath>
 #include <iomanip>
@@ -20,13 +21,12 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include "../timer/timer.hxx"  // TODO: ← adjust to wherever TimerRegistry lives
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Internal helpers (private to this file)
+// Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 namespace stats_detail {
@@ -81,8 +81,8 @@ struct GaugeStats {
 
 // Fixed-width histogram (equal-width buckets).
 struct Histogram {
-    double low;   // lower bound of first bucket
-    double high;  // upper bound of last bucket
+    double low;
+    double high;
     std::vector<std::size_t> buckets;
     std::size_t underflow = 0;
     std::size_t overflow = 0;
@@ -117,6 +117,15 @@ struct Histogram {
 }  // namespace stats_detail
 
 // ─────────────────────────────────────────────────────────────────────────────
+// CtStatID — forward declaration; defined after StatsRegistry
+// ─────────────────────────────────────────────────────────────────────────────
+
+template <std::size_t Hash>
+struct CtStatID {
+    static const std::size_t value;
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
 // StatsRegistry
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -126,12 +135,15 @@ struct Histogram {
  *   - Gauges     : record fractional values, accumulate Welford statistics
  *   - Histograms : bucket sampled values, print distributions with ASCII bars
  *
+ * All names are compile-time ct_string template parameters.
+ * Lookup is O(1) array indexing on the hot path.
+ *
  * Thread safety
  * ─────────────
  * Counter hot path   : atomic, fully lock-free.
- * Gauge hot path     : per-key mutex (fine-grained, not the global one).
- * Histogram hot path : per-key mutex (same approach).
- * All report / reset / erase paths take the registry-level mutex.
+ * Gauge hot path     : per-entry mutex (fine-grained).
+ * Histogram hot path : per-entry mutex (fine-grained).
+ * All report / reset paths take stats_mutex_.
  */
 class StatsRegistry : public TimerRegistry {
    public:
@@ -142,6 +154,12 @@ class StatsRegistry : public TimerRegistry {
     auto operator=(const StatsRegistry&) -> StatsRegistry& = delete;
     auto operator=(StatsRegistry&&) -> StatsRegistry& = delete;
 
+    // Maximum number of distinct compile-time stat names across the whole
+    // program. Shared across counters, gauges, and histograms — each name
+    // occupies one slot regardless of which primitive uses it.
+    // Raise if you hit the abort() in assign_stat_id().
+    static constexpr std::size_t MAX_CT_STATS = 128;
+
     // Default number of histogram buckets
     static constexpr std::size_t DEFAULT_HISTOGRAM_BUCKETS = 10;
     // Default width for histogram bar chart (in characters)
@@ -149,50 +167,75 @@ class StatsRegistry : public TimerRegistry {
     // Width for percentage column in histogram output
     static constexpr int HISTOGRAM_PERCENTAGE_WIDTH = 6;
 
+    /**
+     * Assigns a unique sequential index to a compile-time stat hash.
+     * Called once per unique ct_string at static-init time via CtStatID<H>::value.
+     * Thread-safe via a static atomic counter.
+     */
+    static auto assign_stat_id(std::size_t /*hash*/) -> std::size_t {
+        static std::atomic<std::size_t> next{0};
+        std::size_t idx = next.fetch_add(1, std::memory_order_relaxed);
+        if (idx >= MAX_CT_STATS) {
+            std::cerr << "StatsRegistry: MAX_CT_STATS (" << MAX_CT_STATS << ") exceeded. Increase the limit.\n";
+            std::abort();
+        }
+        return idx;
+    }
+
     // ═════════════════════════════════════════════════════════════════════
     // COUNTERS
     // Counts discrete occurrences. Backed by std::atomic<int64_t>, fully
     // lock-free on the hot path.
     // ═════════════════════════════════════════════════════════════════════
 
+    /** Increments counter Name by delta (default 1). */
+    template <ct_string Name>
+    void counter_inc(int64_t delta = 1) noexcept {
+        ct_counters_[ct_stat_id<Name>()].fetch_add(delta, std::memory_order_relaxed);
+        ct_ensure_counter_name<Name>();
+    }
+
+    /** Decrements counter Name by delta (default 1). */
+    template <ct_string Name>
+    void counter_dec(int64_t delta = 1) noexcept {
+        ct_counters_[ct_stat_id<Name>()].fetch_sub(delta, std::memory_order_relaxed);
+        ct_ensure_counter_name<Name>();
+    }
+
+    /** Sets counter Name to an explicit value. */
+    template <ct_string Name>
+    void counter_set(int64_t value) noexcept {
+        ct_counters_[ct_stat_id<Name>()].store(value, std::memory_order_relaxed);
+    }
+
+    /** Returns the current value of counter Name. */
+    template <ct_string Name>
+    [[nodiscard]] auto counter_get() const noexcept -> int64_t {
+        return ct_counters_[ct_stat_id<Name>()].load(std::memory_order_relaxed);
+    }
+
     /**
-     * Increments counter @p name by @p delta (default 1).
-     * The counter is created with value 0 on first access.
+     * Returns a stable pointer to the underlying atomic<int64_t> for Name.
+     * Cache this in tight loops to bypass even the array lookup:
+     *
+     *   auto* ctr = reg.counter_ref<"hits">();
+     *   for (...) ctr->fetch_add(1, std::memory_order_relaxed);
+     *
+     * The pointer remains valid for the lifetime of the registry.
      */
-    void counter_inc(const std::string& name, int64_t delta = 1) { get_or_create_counter(name).fetch_add(delta, std::memory_order_relaxed); }
-
-    /**
-     * Decrements counter @p name by @p delta (default 1).
-     */
-    void counter_dec(const std::string& name, int64_t delta = 1) { get_or_create_counter(name).fetch_sub(delta, std::memory_order_relaxed); }
-
-    /** Sets counter @p name to an explicit value. */
-    void counter_set(const std::string& name, int64_t value) { get_or_create_counter(name).store(value, std::memory_order_relaxed); }
-
-    /** Returns the current value of counter @p name. */
-    auto counter_get(const std::string& name) const -> int64_t {
-        std::lock_guard lock(stats_mutex_);
-        auto iter = counters_.find(name);
-        if (iter == counters_.end()) {
-            throw std::runtime_error("Counter '" + name + "' does not exist.");
-        }
-        return iter->second->load(std::memory_order_relaxed);
+    template <ct_string Name>
+    [[nodiscard]] auto counter_ref() noexcept -> std::atomic<int64_t>* {
+        ct_ensure_counter_name<Name>();
+        return &ct_counters_[ct_stat_id<Name>()];
     }
 
-    /** Resets counter @p name to 0. */
-    void counter_reset(const std::string& name) {
-        std::lock_guard lock(stats_mutex_);
-        check_counter_exists(name);
-        counters_[name]->store(0, std::memory_order_relaxed);
+    /** Resets counter Name to 0. */
+    template <ct_string Name>
+    void counter_reset() noexcept {
+        ct_counters_[ct_stat_id<Name>()].store(0, std::memory_order_relaxed);
     }
 
-    /** Removes counter @p name from the registry. */
-    void counter_erase(const std::string& name) {
-        std::lock_guard lock(stats_mutex_);
-        check_counter_exists(name);
-        counters_.erase(name);
-        counter_names_.erase(std::remove(counter_names_.begin(), counter_names_.end(), name), counter_names_.end());
-    }
+    // ── Counter reporting ─────────────────────────────────────────────────
 
     struct CounterRow {
         std::string name;
@@ -202,9 +245,11 @@ class StatsRegistry : public TimerRegistry {
     auto get_counter_report() const -> std::vector<CounterRow> {
         std::lock_guard lock(stats_mutex_);
         std::vector<CounterRow> result;
-        result.reserve(counter_names_.size());
-        for (const auto& name : counter_names_) {
-            result.push_back({name, counters_.at(name)->load(std::memory_order_relaxed)});
+        for (std::size_t i = 0; i < MAX_CT_STATS; ++i) {
+            if (!ct_counter_active_[i]) {
+                continue;
+            }
+            result.push_back({ct_stat_names_[i], ct_counters_[i].load(std::memory_order_relaxed)});
         }
         return result;
     }
@@ -233,31 +278,24 @@ class StatsRegistry : public TimerRegistry {
     // identical in style to TimerRegistry's stats report.
     // ═════════════════════════════════════════════════════════════════════
 
-    /**
-     * Records a new sample for gauge @p name.
-     * The gauge is created on first access.
-     */
-    void gauge_record(const std::string& name, double value) {
-        auto& entry = get_or_create_gauge(name);
+    /** Records a new sample for gauge Name. */
+    template <ct_string Name>
+    void gauge_record(double value) {
+        auto& entry = ct_gauges_[ct_stat_id<Name>()];
         std::lock_guard lock(entry.mtx);
         entry.stats.record(value);
+        ct_ensure_gauge_name<Name>();
     }
 
-    /** Resets all samples for gauge @p name. */
-    void gauge_reset(const std::string& name) {
-        std::lock_guard lock(stats_mutex_);
-        check_gauge_exists(name);
-        std::lock_guard glock(gauges_[name]->mtx);
-        gauges_[name]->stats.reset();
+    /** Resets all samples for gauge Name. */
+    template <ct_string Name>
+    void gauge_reset() {
+        auto& entry = ct_gauges_[ct_stat_id<Name>()];
+        std::lock_guard lock(entry.mtx);
+        entry.stats.reset();
     }
 
-    /** Removes gauge @p name from the registry. */
-    void gauge_erase(const std::string& name) {
-        std::lock_guard lock(stats_mutex_);
-        check_gauge_exists(name);
-        gauges_.erase(name);
-        gauge_names_.erase(std::remove(gauge_names_.begin(), gauge_names_.end(), name), gauge_names_.end());
-    }
+    // ── Gauge reporting ───────────────────────────────────────────────────
 
     struct GaugeRow {
         std::string name;
@@ -273,15 +311,16 @@ class StatsRegistry : public TimerRegistry {
     auto get_gauge_report() const -> std::vector<GaugeRow> {
         std::lock_guard lock(stats_mutex_);
         std::vector<GaugeRow> result;
-        result.reserve(gauge_names_.size());
-        for (const auto& name : gauge_names_) {
-            const auto& entry = *gauges_.at(name);
-            std::lock_guard glock(entry.mtx);
-            if (entry.stats.count == 0) {
+        for (std::size_t i = 0; i < MAX_CT_STATS; ++i) {
+            if (!ct_gauge_active_[i]) {
                 continue;
             }
-            const auto& stats = entry.stats;
-            result.push_back({name, stats.count, stats.total, stats.mean, stats.min, stats.max, stats.stddev(), stats.sample_stddev()});
+            std::lock_guard glock(ct_gauges_[i].mtx);
+            if (ct_gauges_[i].stats.count == 0) {
+                continue;
+            }
+            const auto& stats = ct_gauges_[i].stats;
+            result.push_back({ct_stat_names_[i], stats.count, stats.total, stats.mean, stats.min, stats.max, stats.stddev(), stats.sample_stddev()});
         }
         return result;
     }
@@ -291,22 +330,6 @@ class StatsRegistry : public TimerRegistry {
         if (rows.empty()) {
             return;
         }
-
-        // Pick per-column units using the same helper as TimerRegistry.
-        auto pmin = [](double val) -> double { return val > 0.0 ? val : std::numeric_limits<double>::max(); };
-        double min_total = std::numeric_limits<double>::max();
-        double min_mean = std::numeric_limits<double>::max();
-        double min_min = std::numeric_limits<double>::max();
-        double min_max = std::numeric_limits<double>::max();
-        double min_stddev = std::numeric_limits<double>::max();
-        for (const auto& row : rows) {
-            min_total = std::min(min_total, pmin(row.total));
-            min_mean = std::min(min_mean, pmin(row.mean));
-            min_min = std::min(min_min, pmin(row.min));
-            min_max = std::min(min_max, pmin(row.max));
-            min_stddev = std::min(min_stddev, pmin(row.stddev));
-        }
-        // Gauges are unit-less; we just right-align with 2 dp, no unit rescaling.
         constexpr std::size_t DEFAULT_GAUGE_NAME_WIDTH = 8;
         std::size_t name_width = DEFAULT_GAUGE_NAME_WIDTH;
         for (const auto& row : rows) {
@@ -329,61 +352,55 @@ class StatsRegistry : public TimerRegistry {
     // ═════════════════════════════════════════════════════════════════════
     // HISTOGRAMS
     // Buckets sampled values into equal-width bins over [low, high).
-    // Each histogram must be created explicitly with create_histogram()
-    // before recording into iter.
+    // histogram_create<n>() must be called once before histogram_record<n>().
     // ═════════════════════════════════════════════════════════════════════
 
     /**
-     * Creates a histogram with @p n_buckets equal-width bins over [low, high).
+     * Creates a histogram for Name with n_buckets equal-width bins over [low, high).
      * Values outside this range are counted separately as underflow / overflow.
-     * @throws std::runtime_error if a histogram with this name already exists.
+     * @throws std::runtime_error if called more than once for the same Name.
      */
-    void histogram_create(const std::string& name, double low, double high, std::size_t n_buckets = DEFAULT_HISTOGRAM_BUCKETS) {
+    template <ct_string Name>
+    void histogram_create(double low, double high, std::size_t n_buckets = DEFAULT_HISTOGRAM_BUCKETS) {
         if (low >= high) {
             throw std::invalid_argument("Histogram low must be < high.");
         }
         if (n_buckets == 0) {
             throw std::invalid_argument("n_buckets must be > 0.");
         }
-        std::lock_guard lock(stats_mutex_);
-        if (histograms_.contains(name)) {
-            throw std::runtime_error("Histogram '" + name + "' already exists.");
+        auto& entry = ct_hist_entries_[ct_stat_id<Name>()];
+        std::lock_guard lock(entry.mtx);
+        if (entry.created) {
+            throw std::runtime_error("Histogram already created for this name.");
         }
-        histograms_.emplace(name, std::make_unique<HistEntry>(low, high, n_buckets));
-        histogram_names_.push_back(name);
+        entry.hist = stats_detail::Histogram{low, high, n_buckets};
+        entry.created = true;
+        ct_ensure_hist_name<Name>();
     }
 
-    /**
-     * Records value @p v into histogram @p name.
-     * @throws std::runtime_error if the histogram has not been created.
-     */
-    void histogram_record(const std::string& name, double val) {
-        auto& entry = get_histogram_entry(name);
+    /** Records value into histogram Name. */
+    template <ct_string Name>
+    void histogram_record(double val) {
+        auto& entry = ct_hist_entries_[ct_stat_id<Name>()];
         std::lock_guard lock(entry.mtx);
         entry.hist.record(val);
     }
 
-    /** Resets all bucket counts for histogram @p name. */
-    void histogram_reset(const std::string& name) {
-        std::lock_guard lock(stats_mutex_);
-        check_histogram_exists(name);
-        std::lock_guard hlock(histograms_[name]->mtx);
-        histograms_[name]->hist.reset();
+    /** Resets all bucket counts for histogram Name. */
+    template <ct_string Name>
+    void histogram_reset() {
+        auto& entry = ct_hist_entries_[ct_stat_id<Name>()];
+        std::lock_guard lock(entry.mtx);
+        entry.hist.reset();
     }
 
-    /** Removes histogram @p name from the registry. */
-    void histogram_erase(const std::string& name) {
-        std::lock_guard lock(stats_mutex_);
-        check_histogram_exists(name);
-        histograms_.erase(name);
-        histogram_names_.erase(std::remove(histogram_names_.begin(), histogram_names_.end(), name), histogram_names_.end());
-    }
+    // ── Histogram reporting ───────────────────────────────────────────────
 
     struct HistogramBucket {
         double low;
         double high;
         std::size_t count;
-        double pct;  // percentage of in-range samples
+        double pct;
     };
 
     struct HistogramRow {
@@ -397,22 +414,24 @@ class StatsRegistry : public TimerRegistry {
     auto get_histogram_report() const -> std::vector<HistogramRow> {
         std::lock_guard lock(stats_mutex_);
         std::vector<HistogramRow> result;
-        for (const auto& name : histogram_names_) {
-            const auto& entry = *histograms_.at(name);
-            std::lock_guard hlock(entry.mtx);
-            const auto& hist = entry.hist;
+        for (std::size_t i = 0; i < MAX_CT_STATS; ++i) {
+            if (!ct_hist_active_[i]) {
+                continue;
+            }
+            std::lock_guard hlock(ct_hist_entries_[i].mtx);
+            const auto& hist = ct_hist_entries_[i].hist;
             std::size_t in_range = hist.total - hist.underflow - hist.overflow;
             double width = (hist.high - hist.low) / static_cast<double>(hist.buckets.size());
             HistogramRow row;
-            row.name = name;
+            row.name = ct_stat_names_[i];
             row.total = hist.total;
             row.underflow = hist.underflow;
             row.overflow = hist.overflow;
-            for (std::size_t i = 0; i < hist.buckets.size(); ++i) {
-                double blo = hist.low + (static_cast<double>(i) * width);
+            for (std::size_t buck_idx = 0; buck_idx < hist.buckets.size(); ++buck_idx) {
+                double blo = hist.low + (static_cast<double>(buck_idx) * width);
                 double bhi = blo + width;
-                double pct = in_range > 0 ? 100.0 * static_cast<double>(hist.buckets[i]) / static_cast<double>(in_range) : 0.0;
-                row.buckets.push_back({blo, bhi, hist.buckets[i], pct});
+                double pct = in_range > 0 ? 100.0 * static_cast<double>(hist.buckets[buck_idx]) / static_cast<double>(in_range) : 0.0;
+                row.buckets.push_back({blo, bhi, hist.buckets[buck_idx], pct});
             }
             result.push_back(std::move(row));
         }
@@ -421,7 +440,7 @@ class StatsRegistry : public TimerRegistry {
 
     /**
      * Prints histograms with ASCII bar charts.
-     * @param bar_width   Maximum number of '█' characters for 100 %.
+     * @param bar_width Maximum number of '#' characters for 100%.
      */
     void print_histogram_report(int bar_width = DEFAULT_HISTOGRAM_BAR_WIDTH) const {
         const auto rows = get_histogram_report();
@@ -432,7 +451,6 @@ class StatsRegistry : public TimerRegistry {
             std::cout << "── Histogram: " << row.name << "  [total=" << row.total << "  underflow=" << row.underflow << "  overflow=" << row.overflow
                       << "] ──\n";
             std::size_t in_range = row.total - row.underflow - row.overflow;
-            // Compute label width from bucket bounds.
             int label_width = 0;
             for (const auto& bucket : row.buckets) {
                 std::ostringstream oss;
@@ -443,10 +461,7 @@ class StatsRegistry : public TimerRegistry {
                 std::ostringstream label;
                 label << std::fixed << std::setprecision(2) << "[" << bucket.low << ", " << bucket.high << ")";
                 int filled = in_range > 0 ? static_cast<int>(std::round(bucket.pct / 100.0 * bar_width)) : 0;
-                std::string bar(static_cast<std::size_t>(filled), '\xe2');
-                // Fallback to '#' for non-UTF8 terminals.
-                std::string bar_ascii(static_cast<std::size_t>(filled), '#');
-                std::cout << std::left << std::setw(label_width) << label.str() << " | " << bar_ascii
+                std::cout << std::left << std::setw(label_width) << label.str() << " | " << std::string(static_cast<std::size_t>(filled), '#')
                           << std::string(static_cast<std::size_t>(std::max(0, bar_width - filled)), ' ') << " " << std::right
                           << std::setw(HISTOGRAM_PERCENTAGE_WIDTH) << std::fixed << std::setprecision(1) << bucket.pct << "%"
                           << "  (" << bucket.count << ")\n";
@@ -459,9 +474,6 @@ class StatsRegistry : public TimerRegistry {
     // CONVENIENCE — print everything at once
     // ═════════════════════════════════════════════════════════════════════
 
-    /**
-     * Prints timers (merged), counters, gauges, and histograms in sequence.
-     */
     void print_all_reports() const {
         std::cout << "╔══ Timer Report ══════════════════════════════════╗\n";
         print_stats_report();
@@ -474,131 +486,135 @@ class StatsRegistry : public TimerRegistry {
     }
 
    private:
-    // ── Counter internals ─────────────────────────────────────────────────
+    // ── Compile-time ID helper ────────────────────────────────────────────
 
-    auto get_or_create_counter(const std::string& name) -> std::atomic<int64_t>& {
-        // Fast path: counter already exists, no lock needed.
-        // unordered_map lookups are safe to do concurrently as long as no
-        // structural modifications (insert/erase) happen simultaneously.
-        // Since we only insert under the lock below, this is safe.
-        {
-            auto iter = counters_.find(name);
-            if (iter != counters_.end()) {
-                return *iter->second;
+    template <ct_string Name>
+    static auto ct_stat_id() -> std::size_t {
+        return CtStatID<hash_name(Name)>::value;
+    }
+
+    // Each ensure_*_name writes the string name and marks the slot active on
+    // first call. The active flag is checked first without the lock so the
+    // common (already-registered) path is a single branch — no mutex overhead.
+
+    template <ct_string Name>
+    void ct_ensure_counter_name() {
+        const std::size_t idx = ct_stat_id<Name>();
+        if (!ct_counter_active_[idx]) {
+            std::lock_guard lock(stats_mutex_);
+            if (!ct_counter_active_[idx]) {
+                if (ct_stat_names_[idx].empty()) {
+                    ct_stat_names_[idx] = std::string(Name.view());
+                }
+                ct_counter_active_[idx] = true;
             }
         }
-
-        // Slow path: counter doesn't exist, take the lock and insert.
-        std::lock_guard lock(stats_mutex_);
-        // Re-check after acquiring the lock — another thread may have inserted
-        // between the fast path check and the lock acquisition.
-        auto iter = counters_.find(name);
-        if (iter != counters_.end()) {
-            return *iter->second;
-        }
-        counter_names_.push_back(name);
-        return *counters_.emplace(name, std::make_unique<std::atomic<int64_t>>(0)).first->second;
     }
 
-    void check_counter_exists(const std::string& name) const {
-        if (!counters_.contains(name)) {
-            throw std::runtime_error("Counter '" + name + "' does not exist.");
+    template <ct_string Name>
+    void ct_ensure_gauge_name() {
+        const std::size_t idx = ct_stat_id<Name>();
+        if (!ct_gauge_active_[idx]) {
+            std::lock_guard lock(stats_mutex_);
+            if (!ct_gauge_active_[idx]) {
+                if (ct_stat_names_[idx].empty()) {
+                    ct_stat_names_[idx] = std::string(Name.view());
+                }
+                ct_gauge_active_[idx] = true;
+            }
         }
     }
 
-    // ── Gauge internals ───────────────────────────────────────────────────
-
-    struct GaugeEntry {
-        mutable std::mutex mtx;
-        stats_detail::GaugeStats stats;
-    };
-
-    auto get_or_create_gauge(const std::string& name) -> GaugeEntry& {
-        std::lock_guard lock(stats_mutex_);
-        auto iter = gauges_.find(name);
-        if (iter != gauges_.end()) {
-            return *iter->second;
-        }
-        gauge_names_.push_back(name);
-        return *gauges_.emplace(name, std::make_unique<GaugeEntry>()).first->second;
-    }
-
-    void check_gauge_exists(const std::string& name) const {
-        if (!gauges_.contains(name)) {
-            throw std::runtime_error("Gauge '" + name + "' does not exist.");
+    template <ct_string Name>
+    void ct_ensure_hist_name() {
+        const std::size_t idx = ct_stat_id<Name>();
+        if (!ct_hist_active_[idx]) {
+            std::lock_guard lock(stats_mutex_);
+            if (!ct_hist_active_[idx]) {
+                if (ct_stat_names_[idx].empty()) {
+                    ct_stat_names_[idx] = std::string(Name.view());
+                }
+                ct_hist_active_[idx] = true;
+            }
         }
     }
 
-    // ── Histogram internals ───────────────────────────────────────────────
-
-    struct HistEntry {
-        mutable std::mutex mtx;
-        stats_detail::Histogram hist;
-        explicit HistEntry(double low, double high, std::size_t n) : hist(low, high, n) {}
-    };
-
-    auto get_histogram_entry(const std::string& name) -> HistEntry& {
-        std::lock_guard lock(stats_mutex_);
-        auto iter = histograms_.find(name);
-        if (iter == histograms_.end()) {
-            throw std::runtime_error("Histogram '" + name +
-                                     "' does not exist. "
-                                     "Call histogram_create() first.");
-        }
-        return *iter->second;
-    }
-
-    void check_histogram_exists(const std::string& name) const {
-        if (!histograms_.contains(name)) {
-            throw std::runtime_error("Histogram '" + name + "' does not exist.");
-        }
-    }
-
-    // ── Shared state ──────────────────────────────────────────────────────
+    // ── Storage ───────────────────────────────────────────────────────────
 
     // Lock ordering: if both locks are ever needed in the same code path,
     // always acquire mutex_ (TimerRegistry) before stats_mutex_ (StatsRegistry).
     // Currently no code path takes both simultaneously.
-    mutable std::mutex stats_mutex_;  // guards all three collections below
+    mutable std::mutex stats_mutex_;
 
-    // Counters
-    std::unordered_map<std::string, std::unique_ptr<std::atomic<int64_t>>> counters_;
-    std::vector<std::string> counter_names_;
+    // ── Counters — one atomic per slot, lock-free on the hot path ─────────
+    std::array<std::atomic<int64_t>, MAX_CT_STATS> ct_counters_{};
+    std::array<bool, MAX_CT_STATS> ct_counter_active_{};
 
-    // Gauges
-    std::unordered_map<std::string, std::unique_ptr<GaugeEntry>> gauges_;
-    std::vector<std::string> gauge_names_;
+    // ── Gauges — per-entry mutex + Welford stats ──────────────────────────
+    struct CtGaugeEntry {
+        mutable std::mutex mtx;
+        stats_detail::GaugeStats stats;
+    };
+    std::array<CtGaugeEntry, MAX_CT_STATS> ct_gauges_;
+    std::array<bool, MAX_CT_STATS> ct_gauge_active_{};
 
-    // Histograms
-    std::unordered_map<std::string, std::unique_ptr<HistEntry>> histograms_;
-    std::vector<std::string> histogram_names_;
+    // ── Histograms — per-entry mutex + optional Histogram ─────────────────
+    // histogram_create<n>() initialises hist and sets created = true.
+    // The placeholder Histogram in the default constructor is never recorded
+    // into; histogram_record<n>() requires created == true.
+    struct CtHistEntry {
+        mutable std::mutex mtx;
+        stats_detail::Histogram hist{0.0, 1.0, 1};  // placeholder
+        bool created = false;
+    };
+    std::array<CtHistEntry, MAX_CT_STATS> ct_hist_entries_;
+    std::array<bool, MAX_CT_STATS> ct_hist_active_{};
+
+    // Name table — written once per name on first use, read-only thereafter.
+    std::array<std::string, MAX_CT_STATS> ct_stat_names_;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ScopedCounter — RAII increment/decrement (e.g. active-request gauge)
+// CtStatID — maps a compile-time hash to a unique sequential stat index.
+//
+// Instantiated once per unique ct_string across the whole program.
+// The static value is assigned at program startup via StatsRegistry::assign_stat_id().
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Increments a StatsRegistry counter on construction, decrements on destruction.
- * Useful for tracking "currently active" resources (connections, threads, etc.).
- * The registry must outlive all ScopedCounter instances that reference it.
- */
-class ScopedCounter {
-   public:
-    explicit ScopedCounter(std::string name, StatsRegistry& registry) : name_(std::move(name)), registry_(registry) { registry_.counter_inc(name_); }
-    ~ScopedCounter() noexcept { registry_.counter_dec(name_); }
+template <std::size_t Hash>
+const std::size_t CtStatID<Hash>::value = StatsRegistry::assign_stat_id(Hash);
 
-    ScopedCounter(const ScopedCounter&) = delete;
-    ScopedCounter(ScopedCounter&&) = delete;
-    auto operator=(const ScopedCounter&) -> ScopedCounter& = delete;
-    auto operator=(ScopedCounter&&) -> ScopedCounter& = delete;
+// ─────────────────────────────────────────────────────────────────────────────
+// make_scoped_counter — RAII inc/dec for a compile-time named counter
+//
+// Construction increments, destruction decrements. Both operations are
+// lock-free atomic array lookups — no map, no string, no mutex.
+//
+// Usage:
+//   auto c = make_scoped_counter<"active_requests">(reg);
+// ─────────────────────────────────────────────────────────────────────────────
 
-   private:
-    std::string name_;
-    StatsRegistry& registry_;
-};
+template <ct_string Name>
+[[nodiscard]] auto make_scoped_counter(StatsRegistry& reg) {
+    struct CtScopedCounter {
+        std::atomic<int64_t>* ptr_;
 
-// For global use (as if it was singleton)
+        explicit CtScopedCounter(StatsRegistry& reg) : ptr_(reg.template counter_ref<Name>()) { ptr_->fetch_add(1, std::memory_order_relaxed); }
+
+        ~CtScopedCounter() noexcept { ptr_->fetch_sub(1, std::memory_order_relaxed); }
+
+        CtScopedCounter(const CtScopedCounter&) = delete;
+        CtScopedCounter(CtScopedCounter&&) = delete;
+        auto operator=(const CtScopedCounter&) -> CtScopedCounter& = delete;
+        auto operator=(CtScopedCounter&&) -> CtScopedCounter& = delete;
+    };
+    return CtScopedCounter{reg};
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Global convenience
+// ─────────────────────────────────────────────────────────────────────────────
+
 inline auto global_stats() -> StatsRegistry& {
     static StatsRegistry inst;
     return inst;
