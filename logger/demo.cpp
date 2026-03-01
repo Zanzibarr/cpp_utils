@@ -106,7 +106,7 @@ void simulate_config_reload() {
     fake_io(5, 15);
 
     // Example: raise the minimum level at runtime (suppresses DEBUG in production)
-    Logger::get_instance().set_min_level(Logger::level::INFO);
+    default_logger().set_min_level(Logger::level::INFO);
     LOG_INFO << "Log level raised to INFO (DEBUG suppressed from here)";
 }
 
@@ -119,10 +119,10 @@ int main(int argc, char *argv[]) {
     bool use_async = argc > 1 && std::strcmp(argv[1], "async") == 0;
 
     if (use_file) {
-        Logger::get_instance().initialize(true, "server.log", false, true, false);
+        default_logger().initialize(true, "server.log", false, true, false);
         // (colors disabled for file output — the file already contains no escape codes)
     } else if (use_async) {
-        Logger::get_instance().initialize(false, "", true, true, true);
+        default_logger().initialize(false, "", true, true, true);
     } else {
         log_init_async();
     }
@@ -167,10 +167,12 @@ int main(int argc, char *argv[]) {
     int failed = requests_failed.load();
     int success = total - failed;
 
-    Logger::get_instance().set_min_level(Logger::level::BASIC);  // restore for summary
+    default_logger().set_min_level(Logger::level::BASIC);  // restore for summary
 
     LOG_SUCCESS << "All workers done.  total=" << total << "  ok=" << success << "  failed=" << failed;
 
-    Logger::get_instance().flush();
+    LOG << "Exiting";
+
+    default_logger().flush();
     return 0;
 }

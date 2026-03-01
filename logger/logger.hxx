@@ -60,7 +60,7 @@ struct Colors {
 // ── Logger ───────────────────────────────────────────────────────────────────
 
 /**
- * @brief Singleton, thread-safe Logger.
+ * @brief Thread-safe Logger.
  *
  * Supports:
  *  - Synchronous (default) and asynchronous (background-thread) modes.
@@ -133,13 +133,7 @@ class Logger {
         bool moved_ = false;
     };
 
-    // ── Singleton access ──────────────────────────────────────────────────────
-
-    static auto get_instance() -> Logger & {
-        static Logger instance;
-        return instance;
-    }
-
+    Logger() = default;
     Logger(const Logger &) = delete;
     Logger(Logger &&) = delete;
     auto operator=(const Logger &) -> Logger & = delete;
@@ -259,10 +253,6 @@ class Logger {
         std::string thread_id;  // captured at emit() call time
     };
 
-    // ── Construction ─────────────────────────────────────────────────────────
-
-    Logger() = default;
-
     // ── Level metadata helpers ────────────────────────────────────────────────
 
     struct level_meta {
@@ -325,8 +315,8 @@ class Logger {
         std::ostream &ostr = use_err ? std::cerr : std::cout;
 
         // Plain-text prefix (used for both file and no-color console)
-        std::string time_tag = "[" + format_time(rec.elapsed) + "] ";
-        std::string thread_tag = show_thread_ ? "[T:" + rec.thread_id + "] " : "";
+        std::string time_tag = rec.lvl == level::BASIC ? "" : "[" + format_time(rec.elapsed) + "] ";
+        std::string thread_tag = (rec.lvl == level::BASIC || !show_thread_) ? "" : "[T:" + rec.thread_id + "] ";
         std::string level_tag = rec.lvl == level::BASIC ? "" : std::string("[") + label + "] ";
 
         if (file_.is_open()) {
@@ -426,50 +416,55 @@ class Logger {
     std::atomic<bool> worker_running_{false};
 };
 
+inline auto default_logger() -> Logger & {
+    static Logger instance;
+    return instance;
+}
+
 // ── Convenience macros ────────────────────────────────────────────────────────
 
 /// Initialize with default settings (stdout, colors, sync).
-inline void log_init() { Logger::get_instance().initialize(); }
+inline void log_init() { default_logger().initialize(); }
 
 /// Initialize with file output.
-inline void log_init_file(const std::string &path) { Logger::get_instance().initialize(true, path); }
+inline void log_init_file(const std::string &path) { default_logger().initialize(true, path); }
 
 /// Initialize in async (non-blocking) mode.
-inline void log_init_async() { Logger::get_instance().initialize(false, "", true, true, true); }
+inline void log_init_async() { default_logger().initialize(false, "", true, true, true); }
 
 // Stream-style logging macros
-#define LOG Logger::get_instance().log()
-#define LOG_DEBUG Logger::get_instance().debug()
-#define LOG_INFO Logger::get_instance().info()
-#define LOG_SUCCESS Logger::get_instance().success()
-#define LOG_WARN Logger::get_instance().warning()
-#define LOG_WARNING Logger::get_instance().warning()
-#define LOG_ERROR Logger::get_instance().error()
+#define LOG default_logger().log()
+#define LOG_DEBUG default_logger().debug()
+#define LOG_INFO default_logger().info()
+#define LOG_SUCCESS default_logger().success()
+#define LOG_WARN default_logger().warning()
+#define LOG_WARNING default_logger().warning()
+#define LOG_ERROR default_logger().error()
 
 // Direct string logging functions (avoid constructing a log_stream)
 template <typename T>
 inline void LOG_S(const T &msg) {
-    Logger::get_instance().log(std::string(msg));
+    default_logger().log(std::string(msg));
 }
 template <typename T>
 inline void LOG_DEBUG_S(const T &msg) {
-    Logger::get_instance().debug(std::string(msg));
+    default_logger().debug(std::string(msg));
 }
 template <typename T>
 inline void LOG_INFO_S(const T &msg) {
-    Logger::get_instance().info(std::string(msg));
+    default_logger().info(std::string(msg));
 }
 template <typename T>
 inline void LOG_SUCCESS_S(const T &msg) {
-    Logger::get_instance().success(std::string(msg));
+    default_logger().success(std::string(msg));
 }
 template <typename T>
 inline void LOG_WARN_S(const T &msg) {
-    Logger::get_instance().warning(std::string(msg));
+    default_logger().warning(std::string(msg));
 }
 template <typename T>
 inline void LOG_ERROR_S(const T &msg) {
-    Logger::get_instance().error(std::string(msg));
+    default_logger().error(std::string(msg));
 }
 
 /// Stamp the current source location then continue the stream.
