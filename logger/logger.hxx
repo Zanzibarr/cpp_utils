@@ -94,10 +94,13 @@ class Logger {
      */
     class log_stream {
        public:
-        log_stream(Logger &logger_obj, level lvl, bool exit_on_error = false) : lg_(logger_obj), level_(lvl), exit_on_error_(exit_on_error) {}
+        log_stream(Logger &logger_obj, level lvl, bool exit_on_error = false)
+            : lg_(logger_obj), level_(lvl), exit_on_error_(exit_on_error), active_(lvl >= logger_obj.min_level_.load(std::memory_order_relaxed)) {
+            buf_ = active_ ? std::optional<std::ostringstream>{std::in_place} : std::nullopt;
+        }
 
         log_stream(log_stream &&logstr) noexcept
-            : lg_(logstr.lg_), level_(logstr.level_), buf_(std::move(logstr.buf_)), exit_on_error_(logstr.exit_on_error_) {
+            : lg_(logstr.lg_), level_(logstr.level_), buf_(std::move(logstr.buf_)), exit_on_error_(logstr.exit_on_error_), active_(logstr.active_) {
             logstr.moved_ = true;
         }
 
@@ -107,15 +110,17 @@ class Logger {
 
         template <typename T>
         auto operator<<(const T &val) -> log_stream & {
-            buf_ << val;
+            if (active_) {
+                *buf_ << val;  // skip the write entirely when filtered
+            }
             return *this;
         }
 
         ~log_stream() {
-            if (moved_) {
+            if (moved_ || !active_) {
                 return;
             }
-            std::string msg = buf_.str();
+            std::string msg = buf_->str();
             if (msg.empty()) {
                 return;
             }
@@ -128,9 +133,10 @@ class Logger {
        private:
         Logger &lg_;
         level level_;
-        std::ostringstream buf_;
+        std::optional<std::ostringstream> buf_;
         bool exit_on_error_ = false;
         bool moved_ = false;
+        bool active_;  // false → every operator<< is a no-op
     };
 
     Logger() = default;
@@ -280,7 +286,6 @@ class Logger {
     }
 
     // ── Time formatting ───────────────────────────────────────────────────────
-
     static auto format_time(double elapsed) -> std::string {
         constexpr int MS_PER_SECOND = 1000;
         constexpr int MS_PER_MINUTE = 60000;
@@ -292,20 +297,37 @@ class Logger {
         int seconds = (total_ms % MS_PER_MINUTE) / MS_PER_SECOND;
         int millis = total_ms % MS_PER_SECOND;
 
-        return std::format("{:02}:{:02}:{:02}.{:03}", hours, minutes, seconds, millis);
+        // "HH:MM:SS.mmm" = 12 chars + null
+        char buf[13];
+        // Two-digit pairs: manual write, no locale, no heap
+        buf[0] = '0' + (hours / 10);
+        buf[1] = '0' + (hours % 10);
+        buf[2] = ':';
+        buf[3] = '0' + (minutes / 10);
+        buf[4] = '0' + (minutes % 10);
+        buf[5] = ':';
+        buf[6] = '0' + (seconds / 10);
+        buf[7] = '0' + (seconds % 10);
+        buf[8] = '.';
+        buf[9] = '0' + (millis / 100);
+        buf[10] = '0' + (millis / 10 % 10);
+        buf[11] = '0' + (millis % 10);
+        buf[12] = '\0';
+        return {buf, 12};  // construct from ptr+len, no strlen scan
     }
 
     // ── Thread ID formatting ──────────────────────────────────────────────────
-
-    static auto current_thread_id() -> std::string {
-        std::ostringstream strstream;
-        strstream << std::this_thread::get_id();
-        std::string str = strstream.str();
-        // Keep only the last 4 characters for brevity
-        if (str.size() > 4) {
-            str = str.substr(str.size() - 4);
-        }
-        return str;
+    static auto current_thread_id() -> const std::string & {
+        thread_local std::string idx = []() -> std::string {
+            std::ostringstream oss;
+            oss << std::this_thread::get_id();
+            std::string str = oss.str();
+            if (str.size() > 4) {
+                str = str.substr(str.size() - 4);
+            }
+            return str;
+        }();
+        return idx;
     }
 
     // ── Core write (called with mutex held) ───────────────────────────────────
