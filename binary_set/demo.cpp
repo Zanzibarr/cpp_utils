@@ -1,604 +1,518 @@
 /**
- * @file demo.cpp
- * @brief Real-world usage examples for BinarySet and BSSearcher
+ * demo_binary_set.cpp
+ * ─────────────────────────────────────────────────────────────────────────────
+ * A comprehensive demo for BinarySet.
+ * Every public API is exercised; each section is self-contained.
  *
- * Build:
- *   g++ -std=c++20 -Wall -Wextra -O2 -o demo demo.cpp
- *
- * Run:
- *   ./demo
- *
- * This file walks through three self-contained scenarios that show how
- * BinarySet and BSSearcher are used in practice:
- *
- *  Scenario 1 — Permission system
- *      A web application maps user roles to sets of permissions.
- *      We check whether a user has the rights needed to perform an action.
- *
- *  Scenario 2 — Recipe matcher
- *      A kitchen assistant holds a pantry (available ingredients) and a
- *      catalogue of recipes.  We find every recipe that can be made with
- *      what is currently in the pantry, using BSSearcher for fast lookup.
- *
- *  Scenario 3 — Course prerequisite validator
- *      A university registration system models completed courses as a set.
- *      Each offered course has a prerequisite set.  We find all courses a
- *      student is eligible to enrol in.
+ * Compile (C++20):
+ *   g++ -std=c++20 -O2 demo_binary_set.cpp -o demo_bs && ./demo_bs
  */
 
 #include <iomanip>
 #include <iostream>
 #include <string>
-#include <unordered_map>
-#include <vector>
 
 #include "binary_set.hxx"
 
-// ============================================================================
-//  Tiny pretty-print helper
-// ============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
+// Small helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
-void section(const std::string& title) {
-    std::cout << "\n" << std::string(60, '=') << "\n";
-    std::cout << "  " << title << "\n";
-    std::cout << std::string(60, '=') << "\n";
+static void section(const std::string& title) {
+    const int W = 70;
+    std::cout << "\n" << std::string(W, '=') << "\n";
+    int pad = (W - static_cast<int>(title.size()) - 2) / 2;
+    std::cout << std::string(static_cast<std::size_t>(std::max(0, pad)), ' ') << "[ " << title << " ]\n" << std::string(W, '=') << "\n\n";
 }
 
-void subsection(const std::string& title) { std::cout << "\n  -- " << title << " --\n"; }
+static void subsection(const std::string& title) { std::cout << "\n── " << title << " ──────────────────────────────────\n"; }
 
-// ============================================================================
-//  Scenario 1: Permission system
-// ============================================================================
-//
-// The application defines a fixed universe of 16 permissions (0-15).
-// Each permission is given a name for display purposes.
-// Users are assigned a permission set.
-// Actions require a specific set of permissions.
-// We check whether a user's permissions are a superset of the required ones.
-
-namespace permissions {
-
-// The permission universe.  Each constant is an index into the BinarySet.
-enum : unsigned int {
-    READ = 0,
-    WRITE = 1,
-    DELETE = 2,
-    ADMIN = 3,
-    VIEW_REPORTS = 4,
-    EXPORT_DATA = 5,
-    MANAGE_USERS = 6,
-    BILLING = 7,
-    API_ACCESS = 8,
-    AUDIT_LOG = 9,
-    // Total: 10 permissions defined, capacity set to 16 for easy extension.
-};
-
-constexpr unsigned int CAPACITY = 16;
-
-const std::unordered_map<unsigned int, std::string> NAMES = {
-    {READ, "read"},
-    {WRITE, "write"},
-    {DELETE, "delete"},
-    {ADMIN, "admin"},
-    {VIEW_REPORTS, "view_reports"},
-    {EXPORT_DATA, "export_data"},
-    {MANAGE_USERS, "manage_users"},
-    {BILLING, "billing"},
-    {API_ACCESS, "api_access"},
-    {AUDIT_LOG, "audit_log"},
-};
-
-// Pretty-print a permission set.
-void print_perms(const std::string& label, const BinarySet& perms) {
-    std::cout << "  " << std::left << std::setw(20) << label << ": { ";
+// Prints a BinarySet's name, visual representation, and element list.
+static void print_set(const std::string& name, const BinarySet& bs) {
+    std::cout << std::setw(6) << name << " = " << bs << "  size=" << bs.size() << "  {";
     bool first = true;
-    for (unsigned int p : perms) {
+    for (unsigned int e : bs) {
         if (!first) std::cout << ", ";
-        auto it = NAMES.find(p);
-        std::cout << (it != NAMES.end() ? it->second : std::to_string(p));
+        std::cout << e;
         first = false;
     }
-    std::cout << " }\n";
+    std::cout << "}\n";
 }
 
-void run() {
-    section("Scenario 1 — Permission system");
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 1 — Construction
+// ─────────────────────────────────────────────────────────────────────────────
 
-    // -----------------------------------------------------------------------
-    // Define user permission sets
-    // -----------------------------------------------------------------------
-    BinarySet guest(CAPACITY);
-    guest.add(READ);
+void demo_construction() {
+    section("1 · Construction");
 
-    BinarySet editor(CAPACITY);
-    editor.add(READ);
-    editor.add(WRITE);
-    editor.add(VIEW_REPORTS);
+    subsection("1a. Default constructor (capacity 0 — unusable placeholder)");
+    BinarySet placeholder;
+    std::cout << "placeholder.capacity() = " << placeholder.capacity() << "\n";
+    std::cout << "placeholder.size()     = " << placeholder.size() << "\n";
+    std::cout << "placeholder.empty()    = " << std::boolalpha << placeholder.empty() << "\n";
 
-    BinarySet moderator(CAPACITY);
-    moderator.add(READ);
-    moderator.add(WRITE);
-    moderator.add(DELETE);
-    moderator.add(VIEW_REPORTS);
-    moderator.add(EXPORT_DATA);
+    subsection("1b. Empty set with explicit capacity");
+    BinarySet empty(12);
+    print_set("empty", empty);
 
-    BinarySet superadmin(CAPACITY);
-    for (unsigned int p = READ; p <= AUDIT_LOG; ++p) superadmin.add(p);
+    subsection("1c. Fully filled set (fill_all = true)");
+    BinarySet full(12, true);
+    print_set("full", full);
 
-    subsection("User permission sets");
-    print_perms("guest", guest);
-    print_perms("editor", editor);
-    print_perms("moderator", moderator);
-    print_perms("superadmin", superadmin);
+    subsection("1d. Copy construction");
+    BinarySet copy = full;
+    print_set("copy", copy);
+    copy.remove(0);
+    copy.remove(11);
+    std::cout << "After removing 0 and 11 from copy:\n";
+    print_set("copy", copy);
+    std::cout << "Original full is unchanged:\n";
+    print_set("full", full);
 
-    // -----------------------------------------------------------------------
-    // Define required permissions for various actions
-    // -----------------------------------------------------------------------
-    BinarySet req_view(CAPACITY);
-    req_view.add(READ);
-
-    BinarySet req_publish(CAPACITY);
-    req_publish.add(READ);
-    req_publish.add(WRITE);
-
-    BinarySet req_delete_user(CAPACITY);
-    req_delete_user.add(DELETE);
-    req_delete_user.add(MANAGE_USERS);
-
-    BinarySet req_billing_export(CAPACITY);
-    req_billing_export.add(BILLING);
-    req_billing_export.add(EXPORT_DATA);
-
-    subsection("Access control checks  (required ⊆ user?)");
-
-    struct Check {
-        std::string user;
-        const BinarySet& perms;
-        std::string action;
-        const BinarySet& required;
-    };
-    std::vector<Check> checks = {
-        {"guest", guest, "view content", req_view},
-        {"guest", guest, "publish post", req_publish},
-        {"editor", editor, "publish post", req_publish},
-        {"editor", editor, "delete user", req_delete_user},
-        {"moderator", moderator, "delete user", req_delete_user},
-        {"moderator", moderator, "billing export", req_billing_export},
-        {"superadmin", superadmin, "billing export", req_billing_export},
-        {"superadmin", superadmin, "delete user", req_delete_user},
-    };
-
-    for (auto& c : checks) {
-        bool allowed = c.perms.superset_of(c.required);
-        std::cout << "  " << std::left << std::setw(12) << c.user << std::setw(20) << c.action << " -> " << (allowed ? "ALLOWED" : "DENIED") << "\n";
-    }
-
-    // -----------------------------------------------------------------------
-    // Compute which permissions editor is missing to become a moderator
-    // -----------------------------------------------------------------------
-    subsection("What does editor need to reach moderator level?");
-    BinarySet missing = moderator - editor;  // set difference
-    print_perms("missing", missing);
-
-    // -----------------------------------------------------------------------
-    // Revoke a permission from moderator and verify
-    // -----------------------------------------------------------------------
-    subsection("Revoking EXPORT_DATA from moderator");
-    BinarySet revoked_export(CAPACITY);
-    revoked_export.add(EXPORT_DATA);
-    moderator -= revoked_export;
-    print_perms("moderator (updated)", moderator);
-    std::cout << "  Can still view reports? " << (moderator.superset_of(req_view) ? "yes" : "no") << "\n";
-
-    // -----------------------------------------------------------------------
-    // Intersection: shared permissions between editor and moderator
-    // -----------------------------------------------------------------------
-    subsection("Permissions shared by editor and (updated) moderator");
-    BinarySet shared = editor & moderator;
-    print_perms("shared", shared);
-}
-
-}  // namespace permissions
-
-// ============================================================================
-//  Scenario 2: Recipe matcher
-// ============================================================================
-//
-// The pantry is a BinarySet over a universe of ingredients (0-based indices).
-// Each recipe is a BinarySet of required ingredients.
-// BSSearcher lets us find all recipes whose required ingredients
-// are a subset of the current pantry in O(capacity × paths) time,
-// without iterating over every recipe linearly.
-
-namespace recipes {
-
-// Ingredient universe
-enum : unsigned int {
-    FLOUR = 0,
-    SUGAR = 1,
-    BUTTER = 2,
-    EGG = 3,
-    MILK = 4,
-    YEAST = 5,
-    SALT = 6,
-    BAKING_POWDER = 7,
-    COCOA = 8,
-    VANILLA = 9,
-    OLIVE_OIL = 10,
-    GARLIC = 11,
-    PASTA = 12,
-    TOMATO_SAUCE = 13,
-    CHEESE = 14,
-    CHICKEN = 15,
-    LEMON = 16,
-    HERBS = 17,
-};
-
-constexpr unsigned int CAPACITY = 24;  // room for more ingredients
-
-const std::vector<std::string> INGREDIENT_NAMES = {
-    "flour",   "sugar",     "butter", "egg",   "milk",         "yeast",  "salt",    "baking_powder", "cocoa",
-    "vanilla", "olive_oil", "garlic", "pasta", "tomato_sauce", "cheese", "chicken", "lemon",         "herbs",
-};
-
-struct Recipe {
-    unsigned int id;
-    std::string name;
-    BinarySet ingredients;
-};
-
-void print_ingredients(const BinarySet& bs) {
-    bool first = true;
-    for (unsigned int i : bs) {
-        if (!first) std::cout << ", ";
-        std::cout << (i < INGREDIENT_NAMES.size() ? INGREDIENT_NAMES[i] : std::to_string(i));
-        first = false;
+    subsection("1e. Invalid construction — throws std::invalid_argument");
+    try {
+        BinarySet bad(0);
+    } catch (const std::invalid_argument& ex) {
+        std::cout << "Caught expected exception: " << ex.what() << "\n";
     }
 }
 
-void run() {
-    section("Scenario 2 — Recipe matcher");
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 2 — Element mutation
+// ─────────────────────────────────────────────────────────────────────────────
 
-    // -----------------------------------------------------------------------
-    // Build the recipe catalogue
-    // -----------------------------------------------------------------------
-    std::vector<Recipe> catalogue;
+void demo_mutation() {
+    section("2 · Element Mutation");
 
-    auto make_recipe = [&](unsigned int id, const std::string& name, std::initializer_list<unsigned int> ings) {
-        BinarySet bs(CAPACITY);
-        for (auto i : ings) bs.add(i);
-        catalogue.push_back({id, name, std::move(bs)});
-    };
+    BinarySet bs(10);
 
-    make_recipe(1, "Chocolate cake", {FLOUR, SUGAR, BUTTER, EGG, MILK, COCOA, BAKING_POWDER, VANILLA});
-    make_recipe(2, "Bread", {FLOUR, YEAST, SALT, MILK, BUTTER});
-    make_recipe(3, "Pasta al pomodoro", {PASTA, TOMATO_SAUCE, GARLIC, OLIVE_OIL, SALT});
-    make_recipe(4, "Cacio e pepe", {PASTA, CHEESE, SALT});
-    make_recipe(5, "Scrambled eggs", {EGG, BUTTER, SALT, MILK});
-    make_recipe(6, "Garlic bread", {FLOUR, YEAST, BUTTER, GARLIC, SALT});
-    make_recipe(7, "Lemon chicken", {CHICKEN, LEMON, GARLIC, OLIVE_OIL, HERBS, SALT});
-    make_recipe(8, "Pancakes", {FLOUR, EGG, MILK, SUGAR, BUTTER, BAKING_POWDER, SALT});
-    make_recipe(9, "Simple omelette", {EGG, SALT, BUTTER});
-    make_recipe(10, "Tomato pasta bake", {PASTA, TOMATO_SAUCE, CHEESE, GARLIC, OLIVE_OIL, SALT});
+    subsection("2a. add() — returns true on first insert, false if already present");
+    std::cout << "add(3): " << std::boolalpha << bs.add(3) << "\n";
+    std::cout << "add(3): " << bs.add(3) << "  (already present)\n";
+    std::cout << "add(7): " << bs.add(7) << "\n";
+    std::cout << "add(9): " << bs.add(9) << "\n";
+    print_set("bs", bs);
 
-    // -----------------------------------------------------------------------
-    // Index all recipes in the searcher
-    // -----------------------------------------------------------------------
-    BSSearcher searcher(CAPACITY);
-    for (const auto& r : catalogue) searcher.add(r.id, r.ingredients);
+    subsection("2b. remove() — returns true on successful removal");
+    std::cout << "remove(7): " << bs.remove(7) << "\n";
+    std::cout << "remove(7): " << bs.remove(7) << "  (already absent)\n";
+    print_set("bs", bs);
 
-    // Map id -> Recipe for display after the search.
-    std::unordered_map<unsigned int, const Recipe*> by_id;
-    for (const auto& r : catalogue) by_id[r.id] = &r;
+    subsection("2c. clear() — removes all elements");
+    bs.clear();
+    print_set("bs", bs);
+    std::cout << "empty() = " << bs.empty() << "\n";
 
-    subsection("Full recipe catalogue");
-    for (const auto& r : catalogue) {
-        std::cout << "  [" << std::setw(2) << r.id << "] " << std::left << std::setw(22) << r.name << "  needs: ";
-        print_ingredients(r.ingredients);
-        std::cout << "\n";
+    subsection("2d. fill() — inserts every element in [0, capacity-1]");
+    bs.fill();
+    print_set("bs", bs);
+    std::cout << "size() == capacity(): " << (bs.size() == bs.capacity()) << "\n";
+
+    subsection("2e. Out-of-range add — throws std::out_of_range");
+    try {
+        bs.add(bs.capacity());
+    } catch (const std::out_of_range& ex) {
+        std::cout << "Caught expected exception: " << ex.what() << "\n";
     }
+}
 
-    // -----------------------------------------------------------------------
-    // Pantry 1: well-stocked kitchen
-    // -----------------------------------------------------------------------
-    subsection("Pantry 1 — well-stocked kitchen");
-    BinarySet pantry1(CAPACITY);
-    for (unsigned int i :
-         {FLOUR, SUGAR, BUTTER, EGG, MILK, YEAST, SALT, BAKING_POWDER, COCOA, VANILLA, OLIVE_OIL, GARLIC, PASTA, TOMATO_SAUCE, CHEESE})
-        pantry1.add(i);
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 3 — Element queries
+// ─────────────────────────────────────────────────────────────────────────────
 
-    std::cout << "  Available: ";
-    print_ingredients(pantry1);
-    std::cout << "\n\n  Recipes you can make:\n";
+void demo_queries() {
+    section("3 · Element Queries");
 
-    auto ids1 = searcher.find_subsets(pantry1);
-    std::sort(ids1.begin(), ids1.end());
-    for (unsigned int id : ids1) std::cout << "    - " << by_id[id]->name << "\n";
+    BinarySet bs(16);
+    for (unsigned int e : {1u, 4u, 7u, 10u, 13u}) bs.add(e);
+    print_set("bs", bs);
 
-    // -----------------------------------------------------------------------
-    // Pantry 2: nearly empty fridge
-    // -----------------------------------------------------------------------
-    subsection("Pantry 2 — nearly empty fridge");
-    BinarySet pantry2(CAPACITY);
-    pantry2.add(EGG);
-    pantry2.add(BUTTER);
-    pantry2.add(SALT);
+    subsection("3a. contains()");
+    std::cout << "contains(4):  " << std::boolalpha << bs.contains(4) << "\n";
+    std::cout << "contains(5):  " << bs.contains(5) << "\n";
+    std::cout << "contains(13): " << bs.contains(13) << "\n";
 
-    std::cout << "  Available: ";
-    print_ingredients(pantry2);
-    std::cout << "\n\n  Recipes you can make:\n";
+    subsection("3b. operator[] — identical to contains()");
+    std::cout << "bs[7]:  " << bs[7] << "\n";
+    std::cout << "bs[8]:  " << bs[8] << "\n";
 
-    auto ids2 = searcher.find_subsets(pantry2);
-    std::sort(ids2.begin(), ids2.end());
-    if (ids2.empty())
-        std::cout << "    (none)\n";
-    else
-        for (unsigned int id : ids2) std::cout << "    - " << by_id[id]->name << "\n";
+    subsection("3c. size() and empty()");
+    std::cout << "size():  " << bs.size() << "\n";
+    std::cout << "empty(): " << bs.empty() << "\n";
+    BinarySet empty_bs(16);
+    std::cout << "empty set empty(): " << empty_bs.empty() << "\n";
 
-    // -----------------------------------------------------------------------
-    // What single ingredient would unlock the most new recipes from pantry2?
-    // Brute-force over all ingredients not yet in pantry2.
-    // -----------------------------------------------------------------------
-    subsection("Which single ingredient unlocks the most new recipes from pantry2?");
+    subsection("3d. capacity()");
+    std::cout << "capacity(): " << bs.capacity() << "\n";
+}
 
-    unsigned int best_ingredient = 0;
-    int best_gain = -1;
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 4 — Set-membership queries
+// ─────────────────────────────────────────────────────────────────────────────
 
-    for (unsigned int ing = 0; ing < CAPACITY; ++ing) {
-        if (pantry2.contains(ing)) continue;
+void demo_membership() {
+    section("4 · Set-Membership Queries");
 
-        BinarySet extended = pantry2;
-        extended.add(ing);
-        int gain = static_cast<int>(searcher.find_subsets(extended).size()) - static_cast<int>(ids2.size());
-        if (gain > best_gain) {
-            best_gain = gain;
-            best_ingredient = ing;
+    BinarySet large(16, true);  // {0..15}
+    BinarySet small(16);
+    small.add(2);
+    small.add(5);
+    small.add(9);
+
+    BinarySet disjoint(16);
+    disjoint.add(0);
+    disjoint.add(6);
+    disjoint.add(12);
+
+    print_set("large", large);
+    print_set("small", small);
+    print_set("disjoint", disjoint);
+
+    subsection("4a. subset_of()");
+    std::cout << "small.subset_of(large):   " << std::boolalpha << small.subset_of(large) << "  (expected true)\n";
+    std::cout << "large.subset_of(small):   " << large.subset_of(small) << "  (expected false)\n";
+    std::cout << "small.subset_of(disjoint):" << small.subset_of(disjoint) << "  (expected false)\n";
+
+    subsection("4b. superset_of()");
+    std::cout << "large.superset_of(small):   " << large.superset_of(small) << "  (expected true)\n";
+    std::cout << "small.superset_of(large):   " << small.superset_of(large) << "  (expected false)\n";
+
+    subsection("4c. intersects()");
+    std::cout << "small.intersects(large):    " << small.intersects(large) << "  (expected true)\n";
+    std::cout << "small.intersects(disjoint): " << small.intersects(disjoint) << "  (expected false)\n";
+
+    subsection("4d. Capacity mismatch — throws std::invalid_argument");
+    BinarySet other(8);
+    try {
+        small.subset_of(other);
+    } catch (const std::invalid_argument& ex) {
+        std::cout << "Caught expected exception: " << ex.what() << "\n";
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 5 — Set algebra (non-mutating)
+// ─────────────────────────────────────────────────────────────────────────────
+
+void demo_algebra() {
+    section("5 · Set Algebra (Non-Mutating)");
+
+    BinarySet a(16), b(16);
+    for (unsigned int e : {1u, 3u, 5u, 7u, 9u}) a.add(e);
+    for (unsigned int e : {3u, 5u, 6u, 8u, 9u}) b.add(e);
+    print_set("a", a);
+    print_set("b", b);
+
+    subsection("5a. operator& — intersection (A ∩ B)");
+    print_set("a&b", a & b);
+
+    subsection("5b. operator| — union (A ∪ B)");
+    print_set("a|b", a | b);
+
+    subsection("5c. operator- — set difference (A \\ B)");
+    print_set("a-b", a - b);
+    print_set("b-a", b - a);
+
+    subsection("5d. operator^ — symmetric difference (A △ B)");
+    print_set("a^b", a ^ b);
+
+    subsection("5e. operator! — complement (∁A)");
+    print_set("!a", !a);
+    print_set("!b", !b);
+
+    subsection("5f. Chaining operators");
+    // Elements in exactly one of a or b, excluding element 6
+    BinarySet excl(16);
+    excl.add(6);
+    BinarySet result = (a ^ b) - excl;
+    print_set("(a^b)-{6}", result);
+
+    subsection("5g. Algebraic identities");
+    BinarySet universe(16, true);
+    BinarySet empty_set(16);
+
+    std::cout << "a | !a == universe: " << ((a | !a) == universe) << "\n";
+    std::cout << "a & !a == empty:    " << ((a & !a) == empty_set) << "\n";
+    std::cout << "a | empty == a:     " << ((a | empty_set) == a) << "\n";
+    std::cout << "a & universe == a:  " << ((a & universe) == a) << "\n";
+    std::cout << "a - a == empty:     " << ((a - a) == empty_set) << "\n";
+    std::cout << "!!a == a:           " << ((!(!a)) == a) << "\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 6 — In-place algebra
+// ─────────────────────────────────────────────────────────────────────────────
+
+void demo_inplace_algebra() {
+    section("6 · In-Place Algebra");
+
+    BinarySet a(16), b(16);
+    for (unsigned int e : {1u, 3u, 5u, 7u, 9u}) a.add(e);
+    for (unsigned int e : {3u, 5u, 6u, 8u, 9u}) b.add(e);
+
+    subsection("6a. operator&= — in-place intersection");
+    BinarySet t = a;
+    t &= b;
+    print_set("a&=b", t);
+
+    subsection("6b. operator|= — in-place union");
+    t = a;
+    t |= b;
+    print_set("a|=b", t);
+
+    subsection("6c. operator-= — in-place set difference");
+    t = a;
+    t -= b;
+    print_set("a-=b", t);
+
+    subsection("6d. operator^= — in-place symmetric difference");
+    t = a;
+    t ^= b;
+    print_set("a^=b", t);
+
+    subsection("6e. In-place ops do not affect the right-hand operand");
+    t = a;
+    t &= b;
+    std::cout << "b unchanged after a&=b: " << std::boolalpha;
+    BinarySet b_check(16);
+    for (unsigned int e : {3u, 5u, 6u, 8u, 9u}) b_check.add(e);
+    std::cout << (b == b_check) << "\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 7 — Equality
+// ─────────────────────────────────────────────────────────────────────────────
+
+void demo_equality() {
+    section("7 · Equality");
+
+    BinarySet a(8), b(8), c(8);
+    a.add(1);
+    a.add(3);
+    a.add(5);
+    b.add(1);
+    b.add(3);
+    b.add(5);
+    c.add(1);
+    c.add(3);
+
+    print_set("a", a);
+    print_set("b", b);
+    print_set("c", c);
+
+    std::cout << "a == b: " << std::boolalpha << (a == b) << "  (expected true)\n";
+    std::cout << "a == c: " << (a == c) << "  (expected false)\n";
+    std::cout << "a != c: " << (a != c) << "  (expected true)\n";
+    std::cout << "a != b: " << (a != b) << "  (expected false)\n";
+
+    subsection("Self-equality");
+    std::cout << "a == a: " << (a == a) << "\n";
+
+    subsection("Empty sets with same capacity are equal");
+    BinarySet e1(8), e2(8);
+    std::cout << "empty(8) == empty(8): " << (e1 == e2) << "\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 8 — Iteration
+// ─────────────────────────────────────────────────────────────────────────────
+
+void demo_iteration() {
+    section("8 · Iteration");
+
+    subsection("8a. Range-for — sparse set");
+    BinarySet sparse(20);
+    for (unsigned int e : {2u, 7u, 11u, 19u}) sparse.add(e);
+    print_set("sparse", sparse);
+    std::cout << "Elements: ";
+    for (unsigned int e : sparse) std::cout << e << " ";
+    std::cout << "\n";
+
+    subsection("8b. Range-for — dense set");
+    BinarySet dense(10, true);
+    dense.remove(3);
+    dense.remove(6);
+    dense.remove(9);
+    print_set("dense", dense);
+    std::cout << "Elements: ";
+    for (unsigned int e : dense) std::cout << e << " ";
+    std::cout << "\n";
+
+    subsection("8c. Range-for — empty set (no iterations)");
+    BinarySet empty(8);
+    std::cout << "Iterating empty set: ";
+    for (unsigned int e : empty) std::cout << e << " ";
+    std::cout << "(nothing)\n";
+
+    subsection("8d. Range-for — full set");
+    BinarySet full(8, true);
+    std::cout << "Full set elements: ";
+    for (unsigned int e : full) std::cout << e << " ";
+    std::cout << "\n";
+
+    subsection("8e. Computing sum and max via iteration");
+    BinarySet bs(64);
+    for (unsigned int e : {4u, 8u, 15u, 16u, 23u, 42u}) bs.add(e);
+    unsigned int sum = 0, max_elem = 0;
+    for (unsigned int e : bs) {
+        sum += e;
+        max_elem = e;
+    }
+    std::cout << "Set: ";
+    for (unsigned int e : bs) std::cout << e << " ";
+    std::cout << "\n";
+    std::cout << "Sum: " << sum << "  Max: " << max_elem << "\n";
+
+    subsection("8f. Iterating across chunk boundaries (capacity > 64)");
+    BinarySet cross(130);
+    cross.add(0);    // chunk 0, bit 0
+    cross.add(63);   // chunk 0, bit 63
+    cross.add(64);   // chunk 1, bit 0
+    cross.add(128);  // chunk 2, bit 0
+    cross.add(129);  // chunk 2, bit 1
+    print_set("cross", cross);
+    std::cout << "Elements: ";
+    for (unsigned int e : cross) std::cout << e << " ";
+    std::cout << "\n";
+
+    subsection("8g. Post-increment iterator");
+    BinarySet small(8);
+    small.add(2);
+    small.add(5);
+    small.add(7);
+    auto it = small.begin();
+    std::cout << "First (post-increment): " << *it++ << "\n";
+    std::cout << "Second:                 " << *it++ << "\n";
+    std::cout << "Third:                  " << *it << "\n";
+    std::cout << "At end: " << std::boolalpha << (++it == small.end()) << "\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 9 — Bulk conversion
+// ─────────────────────────────────────────────────────────────────────────────
+
+void demo_conversion() {
+    section("9 · Bulk Conversion");
+
+    subsection("9a. sparse() — returns sorted vector of elements");
+    BinarySet bs(16);
+    for (unsigned int e : {0u, 3u, 6u, 9u, 12u, 15u}) bs.add(e);
+    print_set("bs", bs);
+    auto vec = bs.sparse();
+    std::cout << "sparse() = { ";
+    for (unsigned int e : vec) std::cout << e << " ";
+    std::cout << "}\n";
+
+    subsection("9b. operator std::string — visual representation");
+    std::cout << "string: " << static_cast<std::string>(bs) << "\n";
+
+    subsection("9c. operator<< — stream directly");
+    std::cout << "stream: " << bs << "\n";
+
+    subsection("9d. sparse() on empty set");
+    BinarySet empty(8);
+    auto empty_vec = empty.sparse();
+    std::cout << "sparse() on empty set size: " << empty_vec.size() << "\n";
+
+    subsection("9e. sparse() on full set");
+    BinarySet full(8, true);
+    auto full_vec = full.sparse();
+    std::cout << "sparse() on full set: { ";
+    for (unsigned int e : full_vec) std::cout << e << " ";
+    std::cout << "}\n";
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 10 — Practical example: task dependency tracking
+// ─────────────────────────────────────────────────────────────────────────────
+
+void demo_practical() {
+    section("10 · Practical Example — Task Dependency Tracking");
+
+    std::cout << "We have 8 tasks (IDs 0–7). Each task has a set of prerequisites.\n"
+                 "We track which tasks are 'done' and find which tasks are now runnable.\n\n";
+
+    // Prerequisites for each task — stored as BinarySets over universe [0,8).
+    constexpr unsigned int N = 8;
+    BinarySet prereqs[N] = {
+        BinarySet(N),  // task 0: no prerequisites
+        BinarySet(N),  // task 1: no prerequisites
+        BinarySet(N),  // task 2: depends on 0, 1
+        BinarySet(N),  // task 3: depends on 1
+        BinarySet(N),  // task 4: depends on 2, 3
+        BinarySet(N),  // task 5: depends on 0
+        BinarySet(N),  // task 6: depends on 4, 5
+        BinarySet(N),  // task 7: depends on 3, 6
+    };
+    prereqs[2].add(0);
+    prereqs[2].add(1);
+    prereqs[3].add(1);
+    prereqs[4].add(2);
+    prereqs[4].add(3);
+    prereqs[5].add(0);
+    prereqs[6].add(4);
+    prereqs[6].add(5);
+    prereqs[7].add(3);
+    prereqs[7].add(6);
+
+    BinarySet done(N);  // initially nothing is done
+    BinarySet all_tasks(N, true);
+
+    auto print_runnable = [&]() {
+        BinarySet pending = all_tasks - done;
+        std::cout << "  Done:    " << done << "\n";
+        std::cout << "  Runnable: { ";
+        for (unsigned int t : pending) {
+            if (prereqs[t].subset_of(done)) std::cout << t << " ";
         }
-    }
-
-    std::cout << "  Buy " << (best_ingredient < INGREDIENT_NAMES.size() ? INGREDIENT_NAMES[best_ingredient] : std::to_string(best_ingredient))
-              << " to unlock " << best_gain << " more recipe(s).\n";
-
-    // -----------------------------------------------------------------------
-    // Remove a recipe from the index (e.g. seasonal menu change)
-    // -----------------------------------------------------------------------
-    subsection("Removing 'Lemon chicken' from the menu");
-    searcher.remove(7, by_id[7]->ingredients);
-
-    auto ids_after = searcher.find_subsets(BinarySet(CAPACITY, true));
-    std::cout << "  Recipes still indexed: " << ids_after.size() << "\n";
-}
-
-}  // namespace recipes
-
-// ============================================================================
-//  Scenario 3: Course prerequisite validator
-// ============================================================================
-//
-// Each course in the catalogue is identified by an index into the BinarySet.
-// Some courses have prerequisite sets.
-// Given the set of courses a student has already completed, we use
-// BSSearcher to find all courses whose prerequisites are satisfied.
-
-namespace university {
-
-constexpr unsigned int CAPACITY = 32;  // up to 32 courses in the department
-
-// Courses
-enum : unsigned int {
-    // Year 1
-    CALC1 = 0,
-    CALC2 = 1,
-    LINEAR_ALG = 2,
-    PROG1 = 3,
-    PROG2 = 4,
-    LOGIC = 5,
-    // Year 2
-    ALGO = 6,
-    DATA_STRUCT = 7,
-    PROB_STAT = 8,
-    OS = 9,
-    NETWORKS = 10,
-    DATABASES = 11,
-    // Year 3
-    MACHINE_L = 12,
-    COMPILERS = 13,
-    DIST_SYS = 14,
-    SECURITY = 15,
-    GRAPH_THEORY = 16,
-    // Year 4 / advanced
-    DEEP_LEARN = 17,
-    CRYPTO = 18,
-    CLOUD = 19,
-};
-
-const std::vector<std::string> COURSE_NAMES = {
-    "Calculus I",       "Calculus II",     "Linear Algebra",           "Programming I",     "Programming II", "Logic",
-    "Algorithms",       "Data Structures", "Probability & Statistics", "Operating Systems", "Networks",       "Databases",
-    "Machine Learning", "Compilers",       "Distributed Systems",      "Security",          "Graph Theory",   "Deep Learning",
-    "Cryptography",     "Cloud",
-};
-
-struct Course {
-    unsigned int id;
-    std::string name;
-    BinarySet prerequisites;  // empty = no prerequisites
-};
-
-void run() {
-    section("Scenario 3 — Course prerequisite validator");
-
-    // -----------------------------------------------------------------------
-    // Define the course catalogue with prerequisites
-    // -----------------------------------------------------------------------
-    auto make_course = [&](unsigned int id, std::initializer_list<unsigned int> prereqs) -> Course {
-        BinarySet bs(CAPACITY);
-        for (auto p : prereqs) bs.add(p);
-        return {id, COURSE_NAMES[id], std::move(bs)};
+        std::cout << "}\n";
     };
 
-    std::vector<Course> catalogue = {
-        // Year 1 — no prerequisites
-        make_course(CALC1, {}),
-        make_course(CALC2, {CALC1}),
-        make_course(LINEAR_ALG, {CALC1}),
-        make_course(PROG1, {}),
-        make_course(PROG2, {PROG1}),
-        make_course(LOGIC, {}),
-        // Year 2
-        make_course(ALGO, {PROG2, DATA_STRUCT}),
-        make_course(DATA_STRUCT, {PROG2}),
-        make_course(PROB_STAT, {CALC2}),
-        make_course(OS, {PROG2, DATA_STRUCT}),
-        make_course(NETWORKS, {OS}),
-        make_course(DATABASES, {PROG2, DATA_STRUCT}),
-        // Year 3
-        make_course(MACHINE_L, {PROB_STAT, LINEAR_ALG, PROG2}),
-        make_course(COMPILERS, {ALGO, DATA_STRUCT}),
-        make_course(DIST_SYS, {OS, NETWORKS, DATABASES}),
-        make_course(SECURITY, {NETWORKS, CRYPTO}),
-        make_course(GRAPH_THEORY, {ALGO, LINEAR_ALG}),
-        // Advanced
-        make_course(DEEP_LEARN, {MACHINE_L, LINEAR_ALG}),
-        make_course(CRYPTO, {LOGIC, LINEAR_ALG, PROB_STAT}),
-        make_course(CLOUD, {DIST_SYS}),
+    std::cout << "Initial state:\n";
+    print_runnable();
+
+    auto complete = [&](unsigned int task) {
+        done.add(task);
+        std::cout << "\nCompleted task " << task << ":\n";
+        print_runnable();
     };
 
-    // -----------------------------------------------------------------------
-    // Index every course by its prerequisite set.
-    // The searcher answers: "which prerequisite sets are subsets of
-    // the student's completed-course set?" — i.e. which courses
-    // has the student satisfied all prerequisites for.
-    // -----------------------------------------------------------------------
-    BSSearcher searcher(CAPACITY);
-    std::unordered_map<unsigned int, const Course*> by_id;
+    complete(0);
+    complete(1);
+    complete(5);
+    complete(2);
+    complete(3);
+    complete(4);
+    complete(6);
+    complete(7);
 
-    for (const auto& c : catalogue) {
-        searcher.add(c.id, c.prerequisites);
-        by_id[c.id] = &c;
-    }
-
-    subsection("Full catalogue with prerequisites");
-    for (const auto& c : catalogue) {
-        std::cout << "  " << std::left << std::setw(26) << c.name << "  prereqs: ";
-        if (c.prerequisites.empty()) {
-            std::cout << "(none)";
-        } else {
-            bool first = true;
-            for (unsigned int p : c.prerequisites) {
-                if (!first) std::cout << ", ";
-                std::cout << COURSE_NAMES[p];
-                first = false;
-            }
-        }
-        std::cout << "\n";
-    }
-
-    // -----------------------------------------------------------------------
-    // Student A — first-year student, completed only Year-1 basics
-    // -----------------------------------------------------------------------
-    subsection("Student A — completed: Calc I, Prog I, Logic");
-    BinarySet studentA(CAPACITY);
-    studentA.add(CALC1);
-    studentA.add(PROG1);
-    studentA.add(LOGIC);
-
-    // Find all courses whose prerequisites are satisfied.
-    // We must exclude courses the student already completed.
-    auto eligible = searcher.find_subsets(studentA);
-    std::sort(eligible.begin(), eligible.end());
-
-    std::cout << "  Eligible to enrol in:\n";
-    for (unsigned int id : eligible) {
-        if (!studentA.contains(id))  // don't re-suggest completed courses
-            std::cout << "    - " << COURSE_NAMES[id] << "\n";
-    }
-
-    // -----------------------------------------------------------------------
-    // Student B — completed most of the degree
-    // -----------------------------------------------------------------------
-    subsection("Student B — completed most courses");
-    BinarySet studentB(CAPACITY);
-    for (unsigned int c :
-         {CALC1, CALC2, LINEAR_ALG, PROG1, PROG2, LOGIC, ALGO, DATA_STRUCT, PROB_STAT, OS, NETWORKS, DATABASES, MACHINE_L, COMPILERS, CRYPTO})
-        studentB.add(c);
-
-    std::cout << "  Completed " << studentB.size() << " courses.\n";
-
-    auto eligibleB = searcher.find_subsets(studentB);
-    std::sort(eligibleB.begin(), eligibleB.end());
-
-    std::cout << "  Still available to take:\n";
-    for (unsigned int id : eligibleB)
-        if (!studentB.contains(id)) std::cout << "    - " << COURSE_NAMES[id] << "\n";
-
-    // -----------------------------------------------------------------------
-    // Which single course would unlock the most new options for Student A?
-    // -----------------------------------------------------------------------
-    subsection("Which course should Student A take next for maximum unlock?");
-
-    // Courses Student A hasn't taken but is eligible for right now.
-    std::vector<unsigned int> takeable;
-    for (unsigned int id : eligible)
-        if (!studentA.contains(id)) takeable.push_back(id);
-
-    // Build the set of already-eligible course IDs for fast membership test.
-    BinarySet enrolled_or_eligible(CAPACITY);
-    for (unsigned int id : eligible) enrolled_or_eligible.add(id);
-
-    unsigned int best_course = 0;
-    int best_new = -1;
-
-    for (unsigned int take : takeable) {
-        BinarySet after = studentA;
-        after.add(take);
-        auto newly = searcher.find_subsets(after);
-        // Count courses newly eligible that weren't eligible before
-        // and that the student hasn't already taken.
-        int new_eligible = 0;
-        for (unsigned int id : newly)
-            if (!after.contains(id) && !enrolled_or_eligible.contains(id)) ++new_eligible;
-
-        if (new_eligible > best_new) {
-            best_new = new_eligible;
-            best_course = take;
-        }
-    }
-
-    std::cout << "  Recommended: " << COURSE_NAMES[best_course] << " (unlocks " << best_new << " additional course(s))\n";
-
-    // -----------------------------------------------------------------------
-    // Show courses Student A cannot yet take and what is blocking them
-    // -----------------------------------------------------------------------
-    subsection("Courses Student A cannot yet enrol in (and what's missing)");
-
-    for (const auto& c : catalogue) {
-        if (enrolled_or_eligible.contains(c.id)) continue;
-        BinarySet missing = c.prerequisites - studentA;
-        std::cout << "  " << std::left << std::setw(26) << c.name << "  missing: ";
-        bool first = true;
-        for (unsigned int p : missing) {
-            if (!first) std::cout << ", ";
-            std::cout << COURSE_NAMES[p];
-            first = false;
-        }
-        std::cout << "\n";
-    }
+    std::cout << "\nAll tasks done: " << std::boolalpha << (done == all_tasks) << "\n";
 }
 
-}  // namespace university
-
-// ============================================================================
-//  Entry point
-// ============================================================================
+// ─────────────────────────────────────────────────────────────────────────────
+// main
+// ─────────────────────────────────────────────────────────────────────────────
 
 int main() {
-    permissions::run();
-    recipes::run();
-    university::run();
+    std::cout << std::string(70, '-') << "\n"
+              << "  BinarySet Demo\n"
+              << std::string(70, '-') << "\n";
 
-    std::cout << "\n" << std::string(60, '=') << "\n";
-    std::cout << "  All scenarios completed.\n";
-    std::cout << std::string(60, '=') << "\n\n";
+    demo_construction();
+    demo_mutation();
+    demo_queries();
+    demo_membership();
+    demo_algebra();
+    demo_inplace_algebra();
+    demo_equality();
+    demo_iteration();
+    demo_conversion();
+    demo_practical();
+
+    std::cout << "\n"
+              << std::string(70, '-') << "\n"
+              << "  Demo complete.\n"
+              << std::string(70, '-') << "\n";
     return 0;
 }

@@ -3,7 +3,7 @@
 /**
  * @file binary_set.hxx
  * @brief Compact binary set and related classes
- * @version 1.0.0
+ * @version 1.1.0
  *
  * @author Matteo Zanella <matteozanella2@gmail.com>
  * Copyright 2026 Matteo Zanella
@@ -41,7 +41,6 @@
 #include <cstddef>    // std::ptrdiff_t, std::size_t
 #include <cstdint>    // uint64_t
 #include <iterator>   // std::forward_iterator_tag
-#include <memory>     // std::unique_ptr, std::make_unique
 #include <ostream>    // std::ostream
 #include <stdexcept>  // std::invalid_argument, std::domain_error, std::out_of_range
 #include <string>     // std::string
@@ -577,14 +576,18 @@ class BinarySet {
      * @return iterator pointing to the first element, or end() if the set is
      *         empty.
      */
-    [[nodiscard]] auto begin() const noexcept -> iterator { return {this, 0U}; }
+    [[nodiscard]] auto begin() const noexcept -> iterator {
+        return iterator{this, 0U};  // existing signature, hits begin constructor
+    }
 
     /**
      * @brief Returns the past-the-end iterator.
      *
      * @return iterator representing the end position (value == capacity()).
      */
-    [[nodiscard]] auto end() const noexcept -> iterator { return {this, capacity_}; }
+    [[nodiscard]] auto end() const noexcept -> iterator {
+        return iterator{this, capacity_, true};  // end_tag overload
+    }
 
     // -----------------------------------------------------------------------
     // Iterator
@@ -607,73 +610,71 @@ class BinarySet {
         using pointer = const value_type*;
         using reference = const value_type&;
 
-        /**
-         * @brief Constructs an iterator starting at position @p pos.
-         *
-         * If @p pos does not correspond to a set element, the iterator
-         * advances to the next set element automatically.
-         */
-        iterator(const BinarySet* set, unsigned int pos) noexcept : bs_(set), current_pos_(pos) {
-            if (current_pos_ < bs_->capacity_ && !bs_->test_bit_unchecked(current_pos_)) {
-                advance();
+        // ── End sentinel constructor ───────────────────────────────────────────
+        iterator(const BinarySet* set, unsigned int /*pos — end*/, bool /*end_tag*/) noexcept
+            : bs_(set), chunk_idx_(set->chunks_.size()), current_chunk_(0), current_pos_(set->capacity_) {}
+
+        // ── Begin constructor ──────────────────────────────────────────────────
+        iterator(const BinarySet* set, unsigned int /*pos — begin*/) noexcept : bs_(set), chunk_idx_(0), current_chunk_(0), current_pos_(0) {
+            // Find the first non-empty chunk.
+            while (chunk_idx_ < bs_->chunks_.size()) {
+                current_chunk_ = bs_->chunks_[chunk_idx_];
+                if (current_chunk_ != 0) {
+                    break;
+                }
+                ++chunk_idx_;
             }
+            if (chunk_idx_ >= bs_->chunks_.size()) {
+                // Empty set — become end.
+                current_pos_ = bs_->capacity_;
+                return;
+            }
+            // The lowest set bit of current_chunk_ is the first element.
+            current_pos_ = (static_cast<unsigned int>(chunk_idx_) * detail::CHUNK_BITS) + static_cast<unsigned int>(std::countr_zero(current_chunk_));
+            // Clear that bit so the next ++ sees the remainder.
+            current_chunk_ &= current_chunk_ - 1U;
         }
 
-        /** @brief Pre-increment: advance to the next element. */
-        auto operator++() -> iterator& {
-            ++current_pos_;
-            if (current_pos_ < bs_->capacity_) {
-                advance();
+        auto operator++() noexcept -> iterator& {
+            // Fast path: more bits remain in the current cached chunk word.
+            if (current_chunk_ != 0) {
+                current_pos_ =
+                    (static_cast<unsigned int>(chunk_idx_) * detail::CHUNK_BITS) + static_cast<unsigned int>(std::countr_zero(current_chunk_));
+                current_chunk_ &= current_chunk_ - 1U;  // clear lowest set bit
+                return *this;
             }
+            // Slow path: move to the next non-empty chunk.
+            ++chunk_idx_;
+            while (chunk_idx_ < bs_->chunks_.size()) {
+                current_chunk_ = bs_->chunks_[chunk_idx_];
+                if (current_chunk_ != 0) {
+                    current_pos_ =
+                        (static_cast<unsigned int>(chunk_idx_) * detail::CHUNK_BITS) + static_cast<unsigned int>(std::countr_zero(current_chunk_));
+                    current_chunk_ &= current_chunk_ - 1U;
+                    return *this;
+                }
+                ++chunk_idx_;
+            }
+            // No more chunks — become end.
+            current_pos_ = bs_->capacity_;
             return *this;
         }
 
-        /** @brief Post-increment. */
-        auto operator++(int) -> iterator {
+        auto operator++(int) noexcept -> iterator {
             const iterator tmp{*this};
             ++(*this);
             return tmp;
         }
 
-        /** @brief Dereferences the iterator to obtain the current element. */
         [[nodiscard]] auto operator*() const noexcept -> value_type { return current_pos_; }
-
         [[nodiscard]] auto operator==(const iterator& other) const noexcept -> bool { return current_pos_ == other.current_pos_; }
         [[nodiscard]] auto operator!=(const iterator& other) const noexcept -> bool { return !(*this == other); }
 
        private:
         const BinarySet* bs_;
-        unsigned int current_pos_;
-
-        /**
-         * @brief Advances current_pos_ to the next set bit, starting from
-         *        the current position.
-         *
-         * Uses std::countr_zero to skip over zero-bits in 64-bit chunks,
-         * which is typically a single instruction (BSF/TZCNT on x86).
-         */
-        void advance() noexcept {
-            while (current_pos_ < bs_->capacity_) {
-                const unsigned int chunk_idx = current_pos_ / detail::CHUNK_BITS;
-                const unsigned int bit_idx = current_pos_ % detail::CHUNK_BITS;
-
-                // Mask out bits below current position in the current chunk
-                const detail::chunk_t remaining = bs_->chunks_[chunk_idx] >> bit_idx;
-
-                if (remaining != 0) {
-                    // std::countr_zero gives the offset of the lowest set bit
-                    current_pos_ += static_cast<unsigned int>(std::countr_zero(remaining));
-                    if (current_pos_ < bs_->capacity_) {
-                        return;
-                    }
-                    break;
-                }
-                // Move to the start of the next chunk
-                current_pos_ = (chunk_idx + 1U) * detail::CHUNK_BITS;
-            }
-            // Clamp to capacity (end sentinel)
-            current_pos_ = std::min(current_pos_, bs_->capacity_);
-        }
+        std::size_t chunk_idx_;          ///< Index of the chunk currently being consumed
+        detail::chunk_t current_chunk_;  ///< Remaining bits of chunks_[chunk_idx_], LSB-first
+        unsigned int current_pos_;       ///< Value yielded by operator*
     };
 
    private:
@@ -748,273 +749,4 @@ class BinarySet {
     unsigned int capacity_{0};
     std::size_t size_{0};
     std::vector<detail::chunk_t> chunks_;
-
-    // BSSearcher needs direct chunk access for efficient traversal
-    friend class BSSearcher;
-};
-
-// ===========================================================================
-//  BSSearcher
-// ===========================================================================
-
-/**
- * @brief Trie-based structure for efficient subset lookups over a collection
- *        of BinarySets.
- *
- * ### Structure
- * Internally, the searcher builds a binary trie of depth @c capacity.  Each
- * level @c i corresponds to element @c i of the universe.  An edge going
- * **left** encodes "element absent"; an edge going **right** encodes "element
- * present".  A leaf (a node at depth == capacity) stores the user-supplied
- * identifiers of all sets that were registered via add().
- *
- * ### Subset query
- * Given a query set @c Q, a stored set @c S is a subset of @c Q iff for every
- * element @c i: if S contains @c i then Q also contains @c i.  During the
- * traversal, when element @c i is absent from @c Q we can only follow the left
- * edge (element absent in S); when element @c i is present in @c Q we may
- * follow both edges (S may or may not have it).  This prunes the search space
- * to only matching paths.
- *
- * ### Complexity
- * | Operation      | Time                                       |
- * |----------------|--------------------------------------------|
- * | add            | O(capacity)                                |
- * | remove         | O(capacity)                                |
- * | find_subsets   | O(capacity × number_of_live_paths)         |
- *
- * In the worst case (all stored sets are subsets of the query) every stored
- * path is visited.  In practice the pruning is highly effective.
- *
- * ### Example
- * @code
- * BSSearcher idx(10);
- *
- * BinarySet s1(10); s1.add(1); s1.add(3);
- * BinarySet s2(10); s2.add(1); s2.add(5);
- * idx.add(101, s1);
- * idx.add(102, s2);
- *
- * BinarySet query(10);
- * query.add(1); query.add(3); query.add(7);
- *
- * auto result = idx.find_subsets(query);
- * // result == {101}  (s2 is not a subset because element 5 ∉ query)
- * @endcode
- */
-class BSSearcher {
-   private:
-    struct treenode {
-        std::vector<unsigned int> values;  ///< IDs stored at this leaf path
-        std::unique_ptr<treenode> left;    ///< "element absent" child
-        std::unique_ptr<treenode> right;   ///< "element present" child
-
-        treenode() = default;
-    };
-
-   public:
-    /**
-     * @brief Constructs the searcher for BinarySets of the given capacity.
-     *
-     * All sets passed to add(), remove(), and find_subsets() must have exactly
-     * this capacity.
-     *
-     * @param capacity  Universe size; must match BinarySet::capacity() of
-     *                  every set used with this searcher.
-     */
-    explicit BSSearcher(unsigned int capacity) : root_(std::make_unique<treenode>()), capacity_(capacity) {}
-
-    // -----------------------------------------------------------------------
-    // Mutation
-    // -----------------------------------------------------------------------
-
-    /**
-     * @brief Registers a BinarySet under the given identifier.
-     *
-     * Multiple sets with the same @p value may be registered.  Multiple
-     * registrations of the same (@p value, @p set) pair are allowed and each
-     * will produce an independent entry.
-     *
-     * @param value  Arbitrary unsigned integer used to identify this set in
-     *               find_subsets() results.
-     * @param set     The BinarySet to register; must have capacity().
-     *
-     * @throw std::invalid_argument if set.capacity() != capacity().
-     */
-    void add(unsigned int value, const BinarySet& set) {
-        validate_capacity(set);
-
-        treenode* node = root_.get();
-        for (unsigned int i = 0; i < capacity_; ++i) {
-            if (set.test_bit_unchecked(i)) {
-                if (!node->right) {
-                    node->right = std::make_unique<treenode>();
-                }
-                node = node->right.get();
-            } else {
-                if (!node->left) {
-                    node->left = std::make_unique<treenode>();
-                }
-                node = node->left.get();
-            }
-        }
-        node->values.push_back(value);
-    }
-
-    /**
-     * @brief Removes one registration of the given (@p value, @p set) pair.
-     *
-     * If multiple identical registrations exist, only one is removed (the
-     * first match, by insertion order).  After removal, empty branches are
-     * pruned from the trie.
-     *
-     * @param value  Identifier passed to add().
-     * @param set     BinarySet passed to add(); must have capacity().
-     * @return @c true  if a matching registration was found and removed.
-     * @return @c false if no matching registration existed.
-     *
-     * @throw std::invalid_argument if set.capacity() != capacity().
-     */
-    auto remove(unsigned int value, const BinarySet& set) -> bool {
-        validate_capacity(set);
-
-        // Record the path for later pruning
-        std::vector<treenode*> path;
-        std::vector<bool> went_right;
-        path.reserve(capacity_);
-        went_right.reserve(capacity_);
-
-        treenode* node = root_.get();
-        for (unsigned int i = 0; i < capacity_ && (node != nullptr); ++i) {
-            path.push_back(node);
-            bool right = set.test_bit_unchecked(i);
-            went_right.push_back(right);
-            node = right ? node->right.get() : node->left.get();
-        }
-        if (node == nullptr) {
-            return false;
-        }
-
-        // Remove one occurrence of value (swap-and-pop for O(1) erase)
-        auto iter = std::find(node->values.begin(), node->values.end(), value);
-        if (iter == node->values.end()) {
-            return false;
-        }
-        if (iter != node->values.end() - 1) {
-            *iter = node->values.back();
-        }
-        node->values.pop_back();
-
-        // Prune empty branches bottom-up
-        if (node->values.empty() && !node->left && !node->right) {
-            for (std::size_t i = path.size(); i > 0; --i) {
-                treenode* parent = path[i - 1];
-                if (went_right[i - 1]) {
-                    parent->right.reset();
-                } else {
-                    parent->left.reset();
-                }
-
-                if (!parent->values.empty() || parent->left || parent->right) {
-                    break;
-                }
-            }
-        }
-        return true;
-    }
-
-    // -----------------------------------------------------------------------
-    // Query
-    // -----------------------------------------------------------------------
-
-    /**
-     * @brief Returns the identifiers of all registered sets that are subsets
-     *        of @p query.
-     *
-     * A registered set @c S is included in the result iff S ⊆ @p query, i.e.
-     * every element in @c S is also in @p query.
-     *
-     * The order of identifiers in the returned vector is unspecified.  If the
-     * same (value, set) pair was registered multiple times, the value appears
-     * multiple times in the result.
-     *
-     * @param query  The query set; must have capacity().
-     * @return std::vector<unsigned int> of matching identifiers (may be empty).
-     *
-     * @throw std::invalid_argument if query.capacity() != capacity().
-     *
-     * @see find_subsets_into() for a variant that avoids heap allocation.
-     */
-    [[nodiscard]]
-    std::vector<unsigned int> find_subsets(const BinarySet& query) const {
-        std::vector<unsigned int> result;
-        find_subsets_into(query, result);
-        return result;
-    }
-
-    /**
-     * @brief Like find_subsets(), but appends results into a caller-supplied
-     *        vector.
-     *
-     * Use this overload in tight loops to reuse the same result buffer and
-     * avoid repeated heap allocation.
-     *
-     * @param query   The query set; must have capacity().
-     * @param[out] out  Vector to which matching identifiers are appended.
-     *                  Existing contents are not cleared.
-     *
-     * @throw std::invalid_argument if query.capacity() != capacity().
-     */
-    void find_subsets_into(const BinarySet& query, std::vector<unsigned int>& out) const {
-        validate_capacity(query);
-
-        // Level-by-level BFS through the trie.
-        // We maintain two alternating vectors of active nodes.
-        std::vector<const treenode*> current;
-        std::vector<const treenode*> next;
-        current.reserve(detail::INITIAL_NODE_RESERVE);
-        next.reserve(detail::INITIAL_NODE_RESERVE);
-
-        if (root_) {
-            current.push_back(root_.get());
-        }
-
-        for (unsigned int i = 0; i < capacity_ && !current.empty(); ++i) {
-            next.clear();
-            const bool q_has_i = query.test_bit_unchecked(i);
-
-            for (const treenode* node : current) {
-                // Element absent branch: always reachable (S may omit element i)
-                if (node->left) {
-                    next.push_back(node->left.get());
-                }
-                // Element present branch: only reachable if query also has element i
-                if (q_has_i && node->right) {
-                    next.push_back(node->right.get());
-                }
-            }
-
-            current.swap(next);
-        }
-
-        // Collect all values from surviving leaf nodes
-        for (const treenode* node : current) {
-            out.insert(out.end(), node->values.begin(), node->values.end());
-        }
-    }
-
-    /**
-     * @brief Returns the capacity this searcher was constructed with.
-     */
-    [[nodiscard]] unsigned int capacity() const noexcept { return capacity_; }
-
-   private:
-    std::unique_ptr<treenode> root_;
-    unsigned int capacity_;
-
-    void validate_capacity(const BinarySet& set) const {
-        if (capacity_ != set.capacity()) {
-            throw std::invalid_argument("The BinarySet has an unexpected capacity.");
-        }
-    }
 };
