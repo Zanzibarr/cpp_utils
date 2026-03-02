@@ -106,8 +106,10 @@ struct Fixtures {
     BinarySet bs_small_sparse2;  // second set for binary ops
     BinarySet bs_small_dense2;
     std::set<unsigned int> ss_small_sparse, ss_small_dense;
+    std::set<unsigned int> ss_small_sparse2, ss_small_dense2;  // second sets for binary ops
     std::unordered_set<unsigned int> us_small_sparse, us_small_dense;
     std::vector<bool> vb_small_sparse, vb_small_dense;
+    std::vector<bool> vb_small_sparse2;  // second vector for binary ops
 
     // Medium
     BinarySet bs_med_sparse;
@@ -115,8 +117,10 @@ struct Fixtures {
     BinarySet bs_med_sparse2;
     BinarySet bs_med_dense2;
     std::set<unsigned int> ss_med_sparse, ss_med_dense;
+    std::set<unsigned int> ss_med_sparse2, ss_med_dense2;  // second sets for binary ops
     std::unordered_set<unsigned int> us_med_sparse, us_med_dense;
     std::vector<bool> vb_med_sparse, vb_med_dense;
+    std::vector<bool> vb_med_sparse2;  // second vector for binary ops
 
     // Large
     BinarySet bs_large_sparse;
@@ -124,8 +128,10 @@ struct Fixtures {
     BinarySet bs_large_sparse2;
     BinarySet bs_large_dense2;
     std::set<unsigned int> ss_large_sparse, ss_large_dense;
+    std::set<unsigned int> ss_large_sparse2, ss_large_dense2;  // second sets for binary ops
     std::unordered_set<unsigned int> us_large_sparse, us_large_dense;
     std::vector<bool> vb_large_sparse, vb_large_dense;
+    std::vector<bool> vb_large_sparse2;  // second vector for binary ops
 
     Fixtures()
         : bs_small_sparse(CAP_SMALL),
@@ -156,20 +162,29 @@ struct Fixtures {
 
         ss_small_sparse = to_std_set(bs_small_sparse);
         ss_small_dense = to_std_set(bs_small_dense);
+        ss_small_sparse2 = to_std_set(bs_small_sparse2);
+        ss_small_dense2 = to_std_set(bs_small_dense2);
         us_small_sparse = to_unordered_set(bs_small_sparse);
         us_small_dense = to_unordered_set(bs_small_dense);
         vb_small_sparse = to_vector_bool(bs_small_sparse);
         vb_small_dense = to_vector_bool(bs_small_dense);
+        vb_small_sparse2 = to_vector_bool(bs_small_sparse2);
 
         ss_med_sparse = to_std_set(bs_med_sparse);
         ss_med_dense = to_std_set(bs_med_dense);
+        ss_med_sparse2 = to_std_set(bs_med_sparse2);
+        ss_med_dense2 = to_std_set(bs_med_dense2);
         us_med_sparse = to_unordered_set(bs_med_sparse);
         us_med_dense = to_unordered_set(bs_med_dense);
         vb_med_sparse = to_vector_bool(bs_med_sparse);
         vb_med_dense = to_vector_bool(bs_med_dense);
+        vb_med_sparse2 = to_vector_bool(bs_med_sparse2);
 
         ss_large_sparse = to_std_set(bs_large_sparse);
         ss_large_dense = to_std_set(bs_large_dense);
+        ss_large_sparse2 = to_std_set(bs_large_sparse2);
+        ss_large_dense2 = to_std_set(bs_large_dense2);
+        vb_large_sparse2 = to_vector_bool(bs_large_sparse2);
         us_large_sparse = to_unordered_set(bs_large_sparse);
         us_large_dense = to_unordered_set(bs_large_dense);
         vb_large_sparse = to_vector_bool(bs_large_sparse);
@@ -565,14 +580,14 @@ BENCH_CASE_N("BinarySet operator& (intersection) — sparse", 500'000) {
 
 BENCH_CASE_N("std::set_intersection — sparse", 500'000) {
     for (auto _ : state) {
-        auto r = std_set_intersect(fx().ss_small_sparse, fx().ss_small_sparse);
+        auto r = std_set_intersect(fx().ss_small_sparse, fx().ss_small_sparse2);
         DoNotOptimize(r.size());
     }
 }
 
 BENCH_CASE_N("vector<bool> element-wise AND — sparse", 500'000) {
     for (auto _ : state) {
-        auto r = vb_and(fx().vb_small_sparse, fx().vb_small_sparse);
+        auto r = vb_and(fx().vb_small_sparse, fx().vb_small_sparse2);
         DoNotOptimize(r.size());
     }
 }
@@ -586,7 +601,7 @@ BENCH_CASE_N("BinarySet operator| (union) — sparse", 500'000) {
 
 BENCH_CASE_N("std::set_union — sparse", 500'000) {
     for (auto _ : state) {
-        auto r = std_set_union(fx().ss_small_sparse, fx().ss_small_sparse);
+        auto r = std_set_union(fx().ss_small_sparse, fx().ss_small_sparse2);
         DoNotOptimize(r.size());
     }
 }
@@ -600,7 +615,7 @@ BENCH_CASE_N("BinarySet operator- (difference) — sparse", 500'000) {
 
 BENCH_CASE_N("std::set_difference — sparse", 500'000) {
     for (auto _ : state) {
-        auto r = std_set_diff(fx().ss_small_sparse, fx().ss_small_sparse);
+        auto r = std_set_diff(fx().ss_small_sparse, fx().ss_small_sparse2);
         DoNotOptimize(r.size());
     }
 }
@@ -614,7 +629,7 @@ BENCH_CASE_N("BinarySet operator^ (symmetric diff) — sparse", 500'000) {
 
 BENCH_CASE_N("std::set_symmetric_difference — sparse", 500'000) {
     for (auto _ : state) {
-        auto r = std_set_sym_diff(fx().ss_small_sparse, fx().ss_small_sparse);
+        auto r = std_set_sym_diff(fx().ss_small_sparse, fx().ss_small_sparse2);
         DoNotOptimize(r.size());
     }
 }
@@ -637,14 +652,14 @@ BENCH_CASE_N("BinarySet operator& — sparse", 200'000) {
 
 BENCH_CASE_N("std::set_intersection — sparse", 200'000) {
     for (auto _ : state) {
-        auto r = std_set_intersect(fx().ss_med_sparse, fx().ss_med_sparse);
+        auto r = std_set_intersect(fx().ss_med_sparse, fx().ss_med_sparse2);
         DoNotOptimize(r.size());
     }
 }
 
 BENCH_CASE_N("vector<bool> element-wise AND — sparse", 200'000) {
     for (auto _ : state) {
-        auto r = vb_and(fx().vb_med_sparse, fx().vb_med_sparse);
+        auto r = vb_and(fx().vb_med_sparse, fx().vb_med_sparse2);
         DoNotOptimize(r.size());
     }
 }
@@ -658,7 +673,7 @@ BENCH_CASE_N("BinarySet operator& — dense", 200'000) {
 
 BENCH_CASE_N("std::set_intersection — dense", 200'000) {
     for (auto _ : state) {
-        auto r = std_set_intersect(fx().ss_med_dense, fx().ss_med_dense);
+        auto r = std_set_intersect(fx().ss_med_dense, fx().ss_med_dense2);
         DoNotOptimize(r.size());
     }
 }
@@ -672,7 +687,7 @@ BENCH_CASE_N("BinarySet operator| — dense", 200'000) {
 
 BENCH_CASE_N("std::set_union — dense", 200'000) {
     for (auto _ : state) {
-        auto r = std_set_union(fx().ss_med_dense, fx().ss_med_dense);
+        auto r = std_set_union(fx().ss_med_dense, fx().ss_med_dense2);
         DoNotOptimize(r.size());
     }
 }
@@ -702,14 +717,14 @@ BENCH_CASE_N("BinarySet operator& — sparse", 100'000) {
 
 BENCH_CASE_N("std::set_intersection — sparse", 100'000) {
     for (auto _ : state) {
-        auto r = std_set_intersect(fx().ss_large_sparse, fx().ss_large_sparse);
+        auto r = std_set_intersect(fx().ss_large_sparse, fx().ss_large_sparse2);
         DoNotOptimize(r.size());
     }
 }
 
 BENCH_CASE_N("vector<bool> element-wise AND — sparse (large)", 100'000) {
     for (auto _ : state) {
-        auto r = vb_and(fx().vb_large_sparse, fx().vb_large_sparse);
+        auto r = vb_and(fx().vb_large_sparse, fx().vb_large_sparse2);
         DoNotOptimize(r.size());
     }
 }
@@ -723,7 +738,7 @@ BENCH_CASE_N("BinarySet operator& — dense", 100'000) {
 
 BENCH_CASE_N("std::set_intersection — dense", 100'000) {
     for (auto _ : state) {
-        auto r = std_set_intersect(fx().ss_large_dense, fx().ss_large_dense);
+        auto r = std_set_intersect(fx().ss_large_dense, fx().ss_large_dense2);
         DoNotOptimize(r.size());
     }
 }

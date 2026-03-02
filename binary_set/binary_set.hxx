@@ -17,7 +17,6 @@
  *
  * Key design choices:
  *   - Capacity is fixed at construction time (rounded up to the next word).
- *   - `resize()` is provided but reallocates, so it is not a hot-path op.
  *   - The class deliberately avoids `std::bitset` to allow runtime-sized
  *     capacity and to expose the word array for low-level operations.
  *
