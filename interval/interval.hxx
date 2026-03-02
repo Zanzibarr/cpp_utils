@@ -14,7 +14,7 @@
  *   - **Queries** — `contains(v)`, `contains(other)`, `overlaps(other)`,
  *     `length()`.
  *   - **Operations** — `intersect(other)`, `merge(other)`,
- *     `translate(delta)`, `scale(factor)`.
+ *     `expand(amount)`, `translate(delta)`.
  *   - **Normalization** — `normalize()` swaps lo/hi if they are out of order
  *     (floating-point types only, as integral overflow is undefined).
  *   - **Operators** — `==`, `!=`, and `<<` for stream output.
@@ -122,11 +122,43 @@ class Interval {
         if (amount < T{0}) {
             throw std::invalid_argument("expand() amount must be non-negative");
         }
+
+        // Overflow or Underflow check
+        if constexpr (std::is_integral_v<T>) {
+            // underflow
+            if (amount > 0 && min_ < std::numeric_limits<T>::min() + amount) {
+                throw std::overflow_error("expand() would underflow min");
+            }
+            // overflow
+            if (amount > 0 && max_ > std::numeric_limits<T>::max() - amount) {
+                throw std::overflow_error("expand() would overflow max");
+            }
+        } else if constexpr (std::is_floating_point_v<T>) {
+            if (min_ - amount == -std::numeric_limits<T>::infinity() || max_ + amount == std::numeric_limits<T>::infinity()) {
+                throw std::overflow_error("expand() would overflow");
+            }
+        }
+
         return Interval(min_ - amount, max_ + amount);
     }
 
     /** Returns an interval shifted by `offset`. */
-    auto translate(T offset) const -> Interval { return Interval(min_ + offset, max_ + offset); }
+    auto translate(T offset) const -> Interval {
+        if constexpr (std::is_integral_v<T>) {
+            if (offset > T{0} && max_ > std::numeric_limits<T>::max() - offset) {
+                throw std::overflow_error("translate() would overflow max");
+            }
+            if (offset < T{0} && min_ < std::numeric_limits<T>::min() - offset) {
+                throw std::overflow_error("translate() would underflow min");
+            }
+        } else if constexpr (std::is_floating_point_v<T>) {
+            if (min_ + offset == -std::numeric_limits<T>::infinity() || max_ + offset == std::numeric_limits<T>::infinity()) {
+                throw std::overflow_error("translate() would overflow");
+            }
+        }
+
+        return Interval(min_ + offset, max_ + offset);
+    }
 
     // ── Normalization — floating point only ─────────────────────────────────
 
