@@ -122,10 +122,11 @@ class Logger {
                 return;
             }
             std::string msg = buf_->str();
-            if (msg.empty()) {
-                return;
+            if (!msg.empty()) {
+                lg_.emit(msg, level_);
             }
-            lg_.emit(msg, level_);
+            // Terminate for ERROR even when no content was streamed — an error
+            // scope exit is always fatal once the level is active.
             if (exit_on_error_ && level_ == level::ERROR) {
                 _Exit(EXIT_FAILURE);
             }
@@ -203,8 +204,16 @@ class Logger {
     /// Raise or lower the minimum level filter at runtime (thread-safe, lock-free).
     void set_min_level(level lvl) { min_level_.store(lvl, std::memory_order_relaxed); }
 
-    /// Flush both the log file and console streams immediately.
+    /// Flush both the log file and console streams.
+    /// In async mode, blocks until the background queue is fully drained first,
+    /// so all records enqueued before this call are guaranteed to be written.
     void flush() {
+        if (async_mode_) {
+            // Wait until the queue is empty.  The worker signals queue_cv_
+            // (via notify_all) after each drain cycle so this wakes promptly.
+            std::unique_lock lock(queue_mutex_);
+            queue_cv_.wait(lock, [this] { return queue_.empty(); });
+        }
         std::lock_guard lock(mutex_);
         std::cout.flush();
         std::cerr.flush();
@@ -342,11 +351,15 @@ class Logger {
         std::string thread_tag = (rec.lvl == level::BASIC || !show_thread_) ? "" : "[T:" + rec.thread_id + "] ";
         std::string level_tag = rec.lvl == level::BASIC ? "" : std::string("[") + label + "] ";
 
+        // File output (plain text, no ANSI) — written in addition to console,
+        // not instead of it.
         if (file_.is_open()) {
-            // File output — never colored
             file_ << time_tag << thread_tag << level_tag << rec.message << '\n';
             file_.flush();
-        } else if (use_colors_) {
+        }
+
+        // Console output — always emitted (file is supplementary, not exclusive).
+        if (use_colors_) {
             ostr << ansi::codes::cyan << time_tag << ansi::codes::reset << ansi::codes::magenta << thread_tag << ansi::codes::reset << color
                  << level_tag << ansi::codes::reset << rec.message << '\n';
         } else {
@@ -401,6 +414,9 @@ class Logger {
 
                     lock.lock();
                 }
+
+                // Signal flush() waiters that the queue is now empty.
+                queue_cv_.notify_all();
 
                 if (!worker_running_ && queue_.empty()) {
                     break;
