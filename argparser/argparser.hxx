@@ -45,6 +45,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -55,6 +56,8 @@
 #include <typeindex>
 #include <variant>
 #include <vector>
+
+#include "../parameters/parameters.hxx"
 
 namespace cli {
 
@@ -81,6 +84,8 @@ struct Arg {
     std::optional<Value> minValue;  // inclusive, for int/char
     std::optional<Value> maxValue;  // inclusive, for int/char
     std::vector<Value> choices;     // allowed values (any type)
+
+    std::function<void(Value)> setter;  // populates the ParameterRegistry on parse()
 
     // ── fluent builders ────────────────────────────────────────────────
     auto shorthand(char short_name) -> Arg& {
@@ -181,14 +186,39 @@ class ArgParser {
     explicit ArgParser(std::string programName, std::string description = "")
         : programName_(std::move(programName)), description_(std::move(description)) {}
 
-    // Register a new argument and return a reference for chaining
-    template <typename T>
-    auto add(std::string name) -> Arg& {
-        if (find_arg(name) != nullptr) {
-            throw ParseError(std::format("duplicate argument registration: --{}", name));
+    // Register a new argument and return a reference for chaining.
+    // Name is a compile-time string; T is the CLI value type (int, double, bool,
+    // char, std::string, std::filesystem::path). After parse(), the value is
+    // available via get<Name, T>() and in parameters() with these coercions:
+    //   int / char → int64_t,  double → double,  bool → bool,
+    //   std::string / fs::path → std::string.
+    template <ct_string Name, typename T>
+    auto add() -> Arg& {
+        const std::string name_str{Name.view()};
+        if (find_arg(name_str) != nullptr) {
+            throw ParseError(std::format("duplicate argument registration: --{}", name_str));
         }
 
-        args_.push_back(Arg{.name = std::move(name), .type = typeid(T)});
+        args_.push_back(Arg{
+            .name = name_str,
+            .type = typeid(T),
+            .setter =
+                [this](Value val) {
+                    if constexpr (std::is_same_v<T, int>) {
+                        reg_.set<Name>(static_cast<int64_t>(std::get<int>(val)));
+                    } else if constexpr (std::is_same_v<T, double>) {
+                        reg_.set<Name>(std::get<double>(val));
+                    } else if constexpr (std::is_same_v<T, bool>) {
+                        reg_.set<Name>(std::get<bool>(val));
+                    } else if constexpr (std::is_same_v<T, char>) {
+                        reg_.set<Name>(std::string(1, std::get<char>(val)));
+                    } else if constexpr (std::is_same_v<T, std::string>) {
+                        reg_.set<Name>(std::get<std::string>(val));
+                    } else if constexpr (std::is_same_v<T, fs::path>) {
+                        reg_.set<Name>(std::get<fs::path>(val).string());
+                    }
+                },
+        });
 
         return args_.back();
     }
@@ -235,42 +265,48 @@ class ArgParser {
                 throw ParseError(std::format("required argument missing: --{}", arg.name));
             }
         }
+
+        // 5. Populate the compile-time ParameterRegistry from all parsed values.
+        for (const auto& arg : args_) {
+            auto iter = parsed_.find(arg.name);
+            if (iter != parsed_.end()) {
+                arg.setter(iter->second);
+            }
+        }
     }
 
     // ── accessors ──────────────────────────────────────────────────────
 
-    [[nodiscard]] auto has(const std::string& name) const -> bool { return parsed_.contains(name); }
-
-    template <typename T>
-    auto get(const std::string& name) const -> T {
-        // 1. Find parsed value
-        auto value_it = parsed_.find(name);
-        if (value_it == parsed_.end()) {
-            throw ParseError(std::format("argument not found: {}", name));
-        }
-
-        // 2. Find argument descriptor
-        const Arg* argument = nullptr;
-        for (const auto& arg : args_) {
-            if (arg.name == name) {
-                argument = &arg;
-                break;
-            }
-        }
-
-        if (!argument) {
-            throw ParseError(std::format("internal error: argument '{}' not registered", name));
-        }
-
-        // 3. Type check
-        if (argument->type != typeid(T)) {
-            throw ParseError(std::format("type mismatch for --{} (expected {}, requested by get() {})", name, type_to_string(argument->type),
-                                         type_to_string(typeid(T))));
-        }
-
-        // 4. Safe extraction
-        return std::get<T>(value_it->second);
+    // Returns true if Name was parsed (from CLI, TOML, or a default value).
+    template <ct_string Name>
+    [[nodiscard]] auto has() const -> bool {
+        return reg_.has<Name>();
     }
+
+    // Returns the parsed value for Name as type T (same type as in add<Name, T>()).
+    // Coercions applied automatically on get():
+    //   int        ← int64_t (narrowing cast)
+    //   char       ← std::string (first character)
+    //   fs::path   ← std::string
+    //   others     ← direct
+    // @throws std::out_of_range       if Name was not parsed.
+    // @throws std::bad_variant_access if T does not match the stored type.
+    template <ct_string Name, typename T>
+    [[nodiscard]] auto get() const -> T {
+        if constexpr (std::is_same_v<T, int>) {
+            return static_cast<int>(reg_.get<Name, int64_t>());
+        } else if constexpr (std::is_same_v<T, char>) {
+            const auto& str = reg_.get<Name, std::string>();
+            return str.empty() ? '\0' : str[0];
+        } else if constexpr (std::is_same_v<T, fs::path>) {
+            return fs::path(reg_.get<Name, std::string>());
+        } else {
+            return reg_.get<Name, T>();  // double, bool, std::string, int64_t
+        }
+    }
+
+    // Direct access to the underlying ParameterRegistry after parse().
+    [[nodiscard]] auto parameters() const -> const ParameterRegistry& { return reg_; }
 
     // ── help ───────────────────────────────────────────────────────────
 
@@ -621,6 +657,7 @@ class ArgParser {
     std::string description_;
     std::vector<Arg> args_;
     std::map<std::string, Value> parsed_;
+    ParameterRegistry reg_;
 };
 
 }  // namespace cli
