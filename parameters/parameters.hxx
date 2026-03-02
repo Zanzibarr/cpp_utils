@@ -179,6 +179,13 @@ class ParameterRegistry {
 
         const std::size_t idx = CtParamID<hash_name(Name)>::value;
         auto& slot = slots_[idx];
+
+        if (slot.active && slot.name != Name.view()) {
+            // Two different names mapped to the same slot — data corruption would occur silently
+            throw std::logic_error(std::string("ParameterRegistry: FNV-1a hash collision between '") + slot.name + "' and '" +
+                                   std::string(Name.view()) + "' (same slot index)");
+        }
+
         slot.value = std::move(stored);
         if (!slot.active) {
             slot.name = std::string(Name.view());
@@ -206,6 +213,9 @@ class ParameterRegistry {
         const auto& slot = slots_[idx];
         if (!slot.active) {
             throw std::out_of_range(std::string("ParameterRegistry: parameter not set: ") + std::string(Name.view()));
+        }
+        if (!std::holds_alternative<T>(slot.value)) {
+            throw std::runtime_error(std::string("ParameterRegistry: type mismatch for ") + std::string(Name.view()));
         }
         return std::get<T>(slot.value);
     }
