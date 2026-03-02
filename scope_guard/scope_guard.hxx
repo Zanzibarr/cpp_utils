@@ -30,6 +30,7 @@
  */
 
 #include <exception>
+#include <iostream>
 #include <utility>
 
 /** Controls when the guarded callable is executed on scope exit. */
@@ -53,11 +54,12 @@ class ScopeGuard {
     /**
      * @param func      Callable to invoke on scope exit.
      * @param strategy  When to invoke `func` (default: always).
+     * ATTENTION: If the function throws, std:terminate is called
      */
     ScopeGuard(F&& func, ScopeStrategy strategy = ScopeStrategy::EXIT)
         : strategy_(strategy), func_(std::move(func)), initial_exceptions_(std::uncaught_exceptions()), active_(true) {}
 
-    ~ScopeGuard() {
+    ~ScopeGuard() noexcept {
         if (!active_) {
             return;
         }
@@ -66,7 +68,12 @@ class ScopeGuard {
         bool failed = current_exceptions > initial_exceptions_;
 
         if (strategy_ == ScopeStrategy::EXIT || (strategy_ == ScopeStrategy::FAIL && failed) || (strategy_ == ScopeStrategy::SUCCESS && !failed)) {
-            func_();
+            try {
+                func_();
+            } catch (...) {
+                std::cerr << "ScopeGuard: callable threw, terminating\n";
+                std::terminate();
+            }
         }
     }
 
