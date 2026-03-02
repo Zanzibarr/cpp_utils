@@ -13,8 +13,7 @@
  *   - `TimerStats` — inherits `WelfordAccumulator` and adds `get_<stat><D>()`
  *     helpers that convert the stored nanosecond values to any `std::chrono`
  *     duration type.
- *   - `Timer` — RAII start/stop timer; records elapsed nanoseconds into a
- *     `TimerStats` owned by the caller.
+ *   - `Timer` — start/stop timer.
  *   - `TimerRegistry` — process-wide registry keyed by compile-time names
  *     (`CTString` → FNV-1a hash → `CtSlotID`).  Uses thread-local slot
  *     arrays for contention-free recording; slots are merged into a shared
@@ -339,7 +338,7 @@ struct TimerStats : timer_detail::WelfordAccumulator {
  *   One-liner RAII — name resolved at compile time, stop is a pointer deref:
  *   auto t = make_scoped_timer<"db_query">(reg);
  *
- *   Manual handle-based (lowest possible overhead):
+ *   Manual handle-based:
  *   auto* slot = reg.start<"db_query">();
  *   ... work ...
  *   reg.stop(slot);
@@ -410,8 +409,14 @@ class TimerRegistry {
     /**
      * Stops via a Slot* handle returned by start<n>() — no lookup at all, O(1).
      * This is the preferred stop path and is used internally by make_scoped_timer.
+     *
+     * No-op if the timer is not currently running (mirrors Timer::stop() semantics
+     * and prevents a second call from recording a stale last_lap_ value).
      */
     static void stop(Slot* slot) noexcept {
+        if (!slot->timer.is_running()) {
+            return;
+        }
         slot->timer.stop();
         slot->stats.record(slot->timer.last_lap_ns());
     }
@@ -507,6 +512,7 @@ class TimerRegistry {
         double max;
         double stddev;
         double sample_stddev;
+        double M2;
     };
 
     // ── Report accessors ──────────────────────────────────────────────────
@@ -514,6 +520,12 @@ class TimerRegistry {
      * Returns a simple elapsed-time report — one value per name, summed across
      * all live threads and exited threads (graveyard).
      * Useful for a quick overview without the full Welford stats table.
+     *
+     * Returns a snapshot elapsed-time report — one value per name, summed across
+     * all live threads and exited threads (graveyard).
+     * Only completed laps (where stop() has been called) are included.
+     * Any currently-running timer's in-flight time is excluded from this snapshot.
+     * For a live view that includes in-flight time, read timer.elapsed() directly.
      */
     template <timer_detail::ValidDuration D = std::chrono::milliseconds>
     auto get_report() const -> std::vector<std::pair<std::string, double>> {
@@ -538,7 +550,9 @@ class TimerRegistry {
                     if (!local->ct_active[i]) {
                         continue;
                     }
-                    total += local->ct_slots[i].timer.elapsed<D>();
+                    // Snapshot: only count completed laps (stop() has been called).
+                    // In-flight time from a currently-running timer is excluded.
+                    total += timer_detail::ns_to<D>(local->ct_slots[i].stats.total);
                 }
                 break;  // name is unique across slots, no need to keep scanning
             }
@@ -571,7 +585,7 @@ class TimerRegistry {
                 stats.min = row.min;
                 stats.max = row.max;
                 // Reconstruct M2 from stddev: M2 = stddev^2 * count
-                stats.M2 = (row.stddev * row.stddev) * static_cast<double>(row.call_count);
+                stats.M2 = row.M2;
                 merged.merge(stats);
                 ++thread_count;
             }
@@ -717,7 +731,7 @@ class TimerRegistry {
                 const auto& name = registry->ct_names_[i];
                 registry->graveyard_[name].merge(ct_slots[i].stats);
                 const auto& s = ct_slots[i].stats;
-                registry->thread_graveyard_.push_back({name, tid, s.count, s.total, s.mean, s.min, s.max, s.stddev(), s.sample_stddev()});
+                registry->thread_graveyard_.push_back({name, tid, s.count, s.total, s.mean, s.min, s.max, s.stddev(), s.sample_stddev(), s.M2});
             }
             registry->live_threads_.erase(tid);
         }
@@ -738,6 +752,9 @@ class TimerRegistry {
                     known_names_.emplace(ct_names_[id]);
                     known_names_order_.push_back(ct_names_[id]);
                 }
+            } else if (ct_names_[id] != Name.view()) {
+                throw std::logic_error(std::string("TimerRegistry: FNV-1a hash collision between '") + ct_names_[id] + "' and '" +
+                                       std::string(Name.view()) + "'");
             }
             if (tloc.registry == nullptr) {
                 tloc.tid = std::this_thread::get_id();
@@ -752,8 +769,8 @@ class TimerRegistry {
     // This function cannot be made static, otherwise the thread data would be shared across different Registry instances
     // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
     auto thread_local_storage() const -> ThreadLocal& {
-        thread_local ThreadLocal tloc;
-        return tloc;
+        thread_local std::unordered_map<const TimerRegistry*, ThreadLocal> tl_map;
+        return tl_map[this];
     }
 
     // ── Print helpers ─────────────────────────────────────────────────────

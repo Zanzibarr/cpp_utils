@@ -89,6 +89,8 @@ struct Histogram {
     }
 };
 
+enum class SlotKind : uint8_t { Unset, Counter, Gauge, Histogram };
+
 }  // namespace stats_detail
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -167,25 +169,31 @@ class StatsRegistry : public TimerRegistry {
 
     /** Increments counter Name by delta (default 1). */
     template <CTString Name>
-    void counter_inc(int64_t delta = 1) noexcept {
+    void counter_inc(int64_t delta = 1) {
         ct_counters_[ct_stat_id<Name>()].fetch_add(delta, std::memory_order_relaxed);
         ct_ensure_counter_name<Name>();
     }
 
     /** Decrements counter Name by delta (default 1). */
     template <CTString Name>
-    void counter_dec(int64_t delta = 1) noexcept {
+    void counter_dec(int64_t delta = 1) {
         ct_counters_[ct_stat_id<Name>()].fetch_sub(delta, std::memory_order_relaxed);
         ct_ensure_counter_name<Name>();
     }
 
     /** Sets counter Name to an explicit value. */
     template <CTString Name>
-    void counter_set(int64_t value) noexcept {
+    void counter_set(int64_t value) {
         ct_counters_[ct_stat_id<Name>()].store(value, std::memory_order_relaxed);
+        ct_ensure_counter_name<Name>();  // register so counter appears in reports
     }
 
-    /** Returns the current value of counter Name. */
+    /** Returns the current value of counter Name.
+     * Note: this method does not register the counter with the reporting system.
+     * A counter that is only read (never incremented, decremented, or set) will
+     * not appear in get_counter_report(). If you need a zero-valued counter to
+     * be visible in reports, call counter_set<Name>(0) once at startup.
+     */
     template <CTString Name>
     [[nodiscard]] auto counter_get() const noexcept -> int64_t {
         return ct_counters_[ct_stat_id<Name>()].load(std::memory_order_relaxed);
@@ -201,7 +209,7 @@ class StatsRegistry : public TimerRegistry {
      * The pointer remains valid for the lifetime of the registry.
      */
     template <CTString Name>
-    [[nodiscard]] auto counter_ref() noexcept -> std::atomic<int64_t>* {
+    [[nodiscard]] auto counter_ref() -> std::atomic<int64_t>* {
         ct_ensure_counter_name<Name>();
         return &ct_counters_[ct_stat_id<Name>()];
     }
@@ -258,10 +266,14 @@ class StatsRegistry : public TimerRegistry {
     /** Records a new sample for gauge Name. */
     template <CTString Name>
     void gauge_record(double value) {
+        // Register name first (acquires stats_mutex_) — must happen BEFORE
+        // entry.mtx is taken to preserve lock order: stats_mutex_ → entry.mtx.
+        // get_gauge_report() takes stats_mutex_ then entry.mtx; inverting the
+        // order here would cause a deadlock on the first concurrent call.
+        ct_ensure_gauge_name<Name>();
         auto& entry = ct_gauges_[ct_stat_id<Name>()];
         std::lock_guard lock(entry.mtx);
         entry.stats.record(value);
-        ct_ensure_gauge_name<Name>();
     }
 
     /** Resets all samples for gauge Name. */
@@ -345,6 +357,11 @@ class StatsRegistry : public TimerRegistry {
         if (n_buckets == 0) {
             throw std::invalid_argument("n_buckets must be > 0.");
         }
+        // Register name first (acquires stats_mutex_) — must happen BEFORE
+        // entry.mtx is taken to preserve lock order: stats_mutex_ → entry.mtx.
+        // get_histogram_report() takes stats_mutex_ then entry.mtx; inverting
+        // the order here would cause a deadlock on concurrent first-create.
+        ct_ensure_hist_name<Name>();
         auto& entry = ct_hist_entries_[ct_stat_id<Name>()];
         std::lock_guard lock(entry.mtx);
         if (entry.created) {
@@ -352,14 +369,20 @@ class StatsRegistry : public TimerRegistry {
         }
         entry.hist = stats_detail::Histogram{low, high, n_buckets};
         entry.created = true;
-        ct_ensure_hist_name<Name>();
     }
 
-    /** Records value into histogram Name. */
+    /**
+     * Records value into histogram Name.
+     * @throws std::logic_error if histogram_create<Name>() has not been called first.
+     */
     template <CTString Name>
     void histogram_record(double val) {
         auto& entry = ct_hist_entries_[ct_stat_id<Name>()];
         std::lock_guard lock(entry.mtx);
+        if (!entry.created) {
+            throw std::logic_error(std::string("histogram_record called for '") + std::string(Name.view()) +
+                                   "' before histogram_create — call histogram_create<Name>() once at startup.");
+        }
         entry.hist.record(val);
     }
 
@@ -480,9 +503,17 @@ class StatsRegistry : public TimerRegistry {
         if (!ct_counter_active_[idx]) {
             std::lock_guard lock(stats_mutex_);
             if (!ct_counter_active_[idx]) {
-                if (ct_stat_names_[idx].empty()) {
-                    ct_stat_names_[idx] = std::string(Name.view());
+                // Collision check: if slot already has a different name
+                if (!ct_stat_names_[idx].empty() && ct_stat_names_[idx] != Name.view()) {
+                    throw std::logic_error(std::string("StatsRegistry: FNV-1a hash collision between '") + ct_stat_names_[idx] + "' and '" +
+                                           std::string(Name.view()) + "'");
                 }
+                // Check same kind
+                if (ct_stat_kinds_[idx] != stats_detail::SlotKind::Unset && ct_stat_kinds_[idx] != stats_detail::SlotKind::Counter) {
+                    throw std::logic_error("StatsRegistry: name '" + std::string(Name.view()) + "' already registered as a different primitive type");
+                }
+                ct_stat_names_[idx] = std::string(Name.view());
+                ct_stat_kinds_[idx] = stats_detail::SlotKind::Counter;
                 ct_counter_active_[idx] = true;
             }
         }
@@ -494,9 +525,16 @@ class StatsRegistry : public TimerRegistry {
         if (!ct_gauge_active_[idx]) {
             std::lock_guard lock(stats_mutex_);
             if (!ct_gauge_active_[idx]) {
-                if (ct_stat_names_[idx].empty()) {
-                    ct_stat_names_[idx] = std::string(Name.view());
+                // Collision check: if slot already has a different name
+                if (!ct_stat_names_[idx].empty() && ct_stat_names_[idx] != Name.view()) {
+                    throw std::logic_error(std::string("StatsRegistry: FNV-1a hash collision between '") + ct_stat_names_[idx] + "' and '" +
+                                           std::string(Name.view()) + "'");
                 }
+                if (ct_stat_kinds_[idx] != stats_detail::SlotKind::Unset && ct_stat_kinds_[idx] != stats_detail::SlotKind::Gauge) {
+                    throw std::logic_error("StatsRegistry: name '" + std::string(Name.view()) + "' already registered as a different primitive type");
+                }
+                ct_stat_names_[idx] = std::string(Name.view());
+                ct_stat_kinds_[idx] = stats_detail::SlotKind::Gauge;
                 ct_gauge_active_[idx] = true;
             }
         }
@@ -508,9 +546,16 @@ class StatsRegistry : public TimerRegistry {
         if (!ct_hist_active_[idx]) {
             std::lock_guard lock(stats_mutex_);
             if (!ct_hist_active_[idx]) {
-                if (ct_stat_names_[idx].empty()) {
-                    ct_stat_names_[idx] = std::string(Name.view());
+                // Collision check: if slot already has a different name
+                if (!ct_stat_names_[idx].empty() && ct_stat_names_[idx] != Name.view()) {
+                    throw std::logic_error(std::string("StatsRegistry: FNV-1a hash collision between '") + ct_stat_names_[idx] + "' and '" +
+                                           std::string(Name.view()) + "'");
                 }
+                if (ct_stat_kinds_[idx] != stats_detail::SlotKind::Unset && ct_stat_kinds_[idx] != stats_detail::SlotKind::Histogram) {
+                    throw std::logic_error("StatsRegistry: name '" + std::string(Name.view()) + "' already registered as a different primitive type");
+                }
+                ct_stat_names_[idx] = std::string(Name.view());
+                ct_stat_kinds_[idx] = stats_detail::SlotKind::Histogram;
                 ct_hist_active_[idx] = true;
             }
         }
@@ -549,6 +594,9 @@ class StatsRegistry : public TimerRegistry {
 
     // Name table — written once per name on first use, read-only thereafter.
     std::array<std::string, MAX_CT_STATS> ct_stat_names_;
+
+    // Kind table — guards against the same name being registered as two different primitives.
+    std::array<stats_detail::SlotKind, MAX_CT_STATS> ct_stat_kinds_{};
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
