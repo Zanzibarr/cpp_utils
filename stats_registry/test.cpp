@@ -1,7 +1,7 @@
 /**
  * test_stats_registry.cpp
  * ─────────────────────────────────────────────────────────────────────────────
- * Full test suite for TimerRegistry and StatsRegistry (ct_string API).
+ * Full test suite for TimerRegistry and StatsRegistry (CTString API).
  *
  * Compile (C++20):
  *   g++ -std=c++20 -O2 -pthread test_stats_registry.cpp -o test_stats && ./test_stats
@@ -278,7 +278,7 @@ TEST_CASE("get_total get_mean get_min get_max honour Duration conversion") {
 // TIMER REGISTRY — compile-time API
 // ═════════════════════════════════════════════════════════════════════════════
 
-TEST_SUITE("TimerRegistry – ct_string API")
+TEST_SUITE("TimerRegistry – CTString API")
 
 TEST_CASE("start and stop accumulate one call") {
     TimerRegistry reg;

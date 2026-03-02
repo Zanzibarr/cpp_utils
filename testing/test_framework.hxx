@@ -2,8 +2,27 @@
 
 /**
  * @file test_framework.hxx
- * @brief Simple testing framework with basic assertions and colored output.
+ * @brief Lightweight unit-test framework with fluent expectations and colored output.
  * @version 1.0.0
+ *
+ * @details
+ * Tests are registered with `TEST_SUITE` / `TEST_CASE` macros at static-init
+ * time and run via `test_registry::instance().run_all()`.
+ *
+ * Assertions use a fluent `expectation<T>` API:
+ * @code
+ *   expect(result).to_equal(42);
+ *   expect(3.14).to_approx_equal(pi, 1e-6);
+ *   expect_throws(std::out_of_range, vec.at(99));
+ *   expect_no_throw(safe_op());
+ * @endcode
+ *
+ * A failing assertion throws `assertion_error` which the registry catches,
+ * prints the failure message and source location, and counts as a failed
+ * test.  Other exception types are also caught and reported.
+ *
+ * Output is colour-coded via `ansi::` helpers when stdout is a TTY.
+ * `run_all()` returns 0 on full pass, 1 if any test failed.
  *
  * @author Matteo Zanella <matteozanella2@gmail.com>
  * Copyright 2026 Matteo Zanella
@@ -20,29 +39,19 @@
 #include <typeinfo>
 #include <vector>
 
-#ifndef _WIN32
-#include <unistd.h>
-#endif
+#include "../utilities/ansi_colors.hxx"  // TODO: Update to the actual path
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ANSI colors
+// ANSI colors — thin namespace aliases over the shared ansi:: helpers
 // ─────────────────────────────────────────────────────────────────────────────
 namespace testing::color {
 
-inline auto enabled() -> bool {
-#ifdef _WIN32
-    return false;
-#else
-    static bool val = (isatty(fileno(stdout)) != 0);
-    return val;
-#endif
-}
-
-inline auto green(std::string_view str) -> std::string { return enabled() ? "\033[32m" + std::string(str) + "\033[0m" : std::string(str); }
-inline auto red(std::string_view str) -> std::string { return enabled() ? "\033[31m" + std::string(str) + "\033[0m" : std::string(str); }
-inline auto yellow(std::string_view str) -> std::string { return enabled() ? "\033[33m" + std::string(str) + "\033[0m" : std::string(str); }
-inline auto bold(std::string_view str) -> std::string { return enabled() ? "\033[1m" + std::string(str) + "\033[0m" : std::string(str); }
-inline auto dim(std::string_view str) -> std::string { return enabled() ? "\033[2m" + std::string(str) + "\033[0m" : std::string(str); }
+inline auto enabled() -> bool { return ansi::enabled(); }
+inline auto green(std::string_view str) -> std::string { return ansi::green(str); }
+inline auto red(std::string_view str) -> std::string { return ansi::red(str); }
+inline auto yellow(std::string_view str) -> std::string { return ansi::yellow(str); }
+inline auto bold(std::string_view str) -> std::string { return ansi::bold(str); }
+inline auto dim(std::string_view str) -> std::string { return ansi::dim(str); }
 
 }  // namespace testing::color
 
@@ -336,6 +345,9 @@ inline const char* _ts_current_suite_ = "<unset>";
 
 #define expect(val) ::testing::expectation((val), __FILE__, __LINE__)
 
-#define expect_throws(ExType, ...) ::testing::check_throws<ExType>([&] { __VA_ARGS__; }, __FILE__, __LINE__)
+// (void)(__VA_ARGS__) suppresses -Wunused-result for [[nodiscard]] functions
+// and -Wunused-comparison for equality/inequality operators called purely
+// for their side-effects (i.e. to verify they throw).
+#define expect_throws(ExType, ...) ::testing::check_throws<ExType>([&] { (void)(__VA_ARGS__); }, __FILE__, __LINE__)
 
 #define expect_no_throw(...) ::testing::check_no_throw([&] { __VA_ARGS__; }, __FILE__, __LINE__)

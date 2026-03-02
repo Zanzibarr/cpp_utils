@@ -2,8 +2,28 @@
 
 /**
  * @file stats_registry.hxx
- * @brief Statistics registry to complement the TimerRegistry class
+ * @brief Counters, gauges, and histograms registry built on top of TimerRegistry.
  * @version 2.0.0
+ *
+ * @details
+ * `StatsRegistry` extends `TimerRegistry` (from `timer.hxx`) with three
+ * additional measurement primitives, all indexed by compile-time names:
+ *
+ *   - **Counters** — `counter_inc<Name>()` / `counter_add<Name>(n)` use a
+ *     `std::atomic<int64_t>` per slot; the hot path is a single lock-free
+ *     fetch_add with no branching.
+ *   - **Gauges** — `gauge_record<Name>(v)` records a `double` sample using
+ *     Welford's online algorithm (`GaugeStats` is a type alias for
+ *     `timer_detail::WelfordAccumulator` from `timer.hxx`).
+ *   - **Histograms** — `histogram_record<Name>(v)` slots a `double` into one
+ *     of up to 16 user-defined bins; bins are specified as upper-bound edges
+ *     via `set_histogram_bounds<Name>()`.
+ *
+ * Reports (`get_report()` / `print_report()`) return a `StatsReport` that
+ * bundles all four metric types in insertion order.
+ *
+ * The global registry is accessible via `STATS_REG` (macro alias for
+ * `global_stats_registry()`).
  *
  * @author Matteo Zanella <matteozanella2@gmail.com>
  * Copyright 2026 Matteo Zanella
@@ -17,13 +37,12 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
-#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
-#include "../timer/timer.hxx"  // TODO: ← adjust to wherever TimerRegistry lives
+#include "../timer/timer.hxx"  // TODO: Update to the actual path
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
@@ -32,52 +51,8 @@
 namespace stats_detail {
 
 // Welford accumulator for gauge values (doubles).
-struct GaugeStats {
-    std::size_t count = 0;
-    double total = 0.0;
-    double mean = 0.0;
-    double M2 = 0.0;
-    double min = std::numeric_limits<double>::max();
-    double max = std::numeric_limits<double>::lowest();
-
-    void record(double val) {
-        ++count;
-        total += val;
-        min = std::min(min, val);
-        max = std::max(max, val);
-        double delta = val - mean;
-        mean += delta / static_cast<double>(count);
-        M2 += delta * (val - mean);
-    }
-
-    void reset() { *this = GaugeStats{}; }
-
-    [[nodiscard]] auto variance() const -> double { return count < 2 ? 0.0 : M2 / static_cast<double>(count); }
-    [[nodiscard]] auto sample_variance() const -> double { return count < 2 ? 0.0 : M2 / static_cast<double>(count - 1); }
-    [[nodiscard]] auto stddev() const -> double { return std::sqrt(variance()); }
-    [[nodiscard]] auto sample_stddev() const -> double { return std::sqrt(sample_variance()); }
-
-    // Parallel Welford merge.
-    void merge(const GaugeStats& other) {
-        if (other.count == 0) {
-            return;
-        }
-        if (count == 0) {
-            *this = other;
-            return;
-        }
-        auto this_count = static_cast<double>(count);
-        auto other_count = static_cast<double>(other.count);
-        double combined = this_count + other_count;
-        double delta = other.mean - mean;
-        mean = mean + (delta * (other_count / combined));
-        M2 += other.M2 + (delta * delta * (this_count * other_count / combined));
-        count += other.count;
-        total += other.total;
-        min = std::min(min, other.min);
-        max = std::max(max, other.max);
-    }
-};
+// Reuses the shared WelfordAccumulator from timer_detail (see timer.hxx).
+using GaugeStats = timer_detail::WelfordAccumulator;
 
 // Fixed-width histogram (equal-width buckets).
 struct Histogram {
@@ -135,7 +110,7 @@ struct CtStatID {
  *   - Gauges     : record fractional values, accumulate Welford statistics
  *   - Histograms : bucket sampled values, print distributions with ASCII bars
  *
- * All names are compile-time ct_string template parameters.
+ * All names are compile-time CTString template parameters.
  * Lookup is O(1) array indexing on the hot path.
  *
  * Thread safety
@@ -158,6 +133,8 @@ class StatsRegistry : public TimerRegistry {
     // program. Shared across counters, gauges, and histograms — each name
     // occupies one slot regardless of which primitive uses it.
     // Raise if you hit the abort() in assign_stat_id().
+    // Keep in sync with MAX_CT_TIMERS (timer/timer.hxx)
+    // and MAX_CT_PARAMS (parameters/parameters.hxx) — all default to 128.
     static constexpr std::size_t MAX_CT_STATS = 128;
 
     // Default number of histogram buckets
@@ -169,7 +146,7 @@ class StatsRegistry : public TimerRegistry {
 
     /**
      * Assigns a unique sequential index to a compile-time stat hash.
-     * Called once per unique ct_string at static-init time via CtStatID<H>::value.
+     * Called once per unique CTString at static-init time via CtStatID<H>::value.
      * Thread-safe via a static atomic counter.
      */
     static auto assign_stat_id(std::size_t /*hash*/) -> std::size_t {
@@ -189,27 +166,27 @@ class StatsRegistry : public TimerRegistry {
     // ═════════════════════════════════════════════════════════════════════
 
     /** Increments counter Name by delta (default 1). */
-    template <ct_string Name>
+    template <CTString Name>
     void counter_inc(int64_t delta = 1) noexcept {
         ct_counters_[ct_stat_id<Name>()].fetch_add(delta, std::memory_order_relaxed);
         ct_ensure_counter_name<Name>();
     }
 
     /** Decrements counter Name by delta (default 1). */
-    template <ct_string Name>
+    template <CTString Name>
     void counter_dec(int64_t delta = 1) noexcept {
         ct_counters_[ct_stat_id<Name>()].fetch_sub(delta, std::memory_order_relaxed);
         ct_ensure_counter_name<Name>();
     }
 
     /** Sets counter Name to an explicit value. */
-    template <ct_string Name>
+    template <CTString Name>
     void counter_set(int64_t value) noexcept {
         ct_counters_[ct_stat_id<Name>()].store(value, std::memory_order_relaxed);
     }
 
     /** Returns the current value of counter Name. */
-    template <ct_string Name>
+    template <CTString Name>
     [[nodiscard]] auto counter_get() const noexcept -> int64_t {
         return ct_counters_[ct_stat_id<Name>()].load(std::memory_order_relaxed);
     }
@@ -223,14 +200,14 @@ class StatsRegistry : public TimerRegistry {
      *
      * The pointer remains valid for the lifetime of the registry.
      */
-    template <ct_string Name>
+    template <CTString Name>
     [[nodiscard]] auto counter_ref() noexcept -> std::atomic<int64_t>* {
         ct_ensure_counter_name<Name>();
         return &ct_counters_[ct_stat_id<Name>()];
     }
 
     /** Resets counter Name to 0. */
-    template <ct_string Name>
+    template <CTString Name>
     void counter_reset() noexcept {
         ct_counters_[ct_stat_id<Name>()].store(0, std::memory_order_relaxed);
     }
@@ -279,7 +256,7 @@ class StatsRegistry : public TimerRegistry {
     // ═════════════════════════════════════════════════════════════════════
 
     /** Records a new sample for gauge Name. */
-    template <ct_string Name>
+    template <CTString Name>
     void gauge_record(double value) {
         auto& entry = ct_gauges_[ct_stat_id<Name>()];
         std::lock_guard lock(entry.mtx);
@@ -288,7 +265,7 @@ class StatsRegistry : public TimerRegistry {
     }
 
     /** Resets all samples for gauge Name. */
-    template <ct_string Name>
+    template <CTString Name>
     void gauge_reset() {
         auto& entry = ct_gauges_[ct_stat_id<Name>()];
         std::lock_guard lock(entry.mtx);
@@ -360,7 +337,7 @@ class StatsRegistry : public TimerRegistry {
      * Values outside this range are counted separately as underflow / overflow.
      * @throws std::runtime_error if called more than once for the same Name.
      */
-    template <ct_string Name>
+    template <CTString Name>
     void histogram_create(double low, double high, std::size_t n_buckets = DEFAULT_HISTOGRAM_BUCKETS) {
         if (low >= high) {
             throw std::invalid_argument("Histogram low must be < high.");
@@ -379,7 +356,7 @@ class StatsRegistry : public TimerRegistry {
     }
 
     /** Records value into histogram Name. */
-    template <ct_string Name>
+    template <CTString Name>
     void histogram_record(double val) {
         auto& entry = ct_hist_entries_[ct_stat_id<Name>()];
         std::lock_guard lock(entry.mtx);
@@ -387,7 +364,7 @@ class StatsRegistry : public TimerRegistry {
     }
 
     /** Resets all bucket counts for histogram Name. */
-    template <ct_string Name>
+    template <CTString Name>
     void histogram_reset() {
         auto& entry = ct_hist_entries_[ct_stat_id<Name>()];
         std::lock_guard lock(entry.mtx);
@@ -488,7 +465,7 @@ class StatsRegistry : public TimerRegistry {
    private:
     // ── Compile-time ID helper ────────────────────────────────────────────
 
-    template <ct_string Name>
+    template <CTString Name>
     static auto ct_stat_id() -> std::size_t {
         return CtStatID<hash_name(Name)>::value;
     }
@@ -497,7 +474,7 @@ class StatsRegistry : public TimerRegistry {
     // first call. The active flag is checked first without the lock so the
     // common (already-registered) path is a single branch — no mutex overhead.
 
-    template <ct_string Name>
+    template <CTString Name>
     void ct_ensure_counter_name() {
         const std::size_t idx = ct_stat_id<Name>();
         if (!ct_counter_active_[idx]) {
@@ -511,7 +488,7 @@ class StatsRegistry : public TimerRegistry {
         }
     }
 
-    template <ct_string Name>
+    template <CTString Name>
     void ct_ensure_gauge_name() {
         const std::size_t idx = ct_stat_id<Name>();
         if (!ct_gauge_active_[idx]) {
@@ -525,7 +502,7 @@ class StatsRegistry : public TimerRegistry {
         }
     }
 
-    template <ct_string Name>
+    template <CTString Name>
     void ct_ensure_hist_name() {
         const std::size_t idx = ct_stat_id<Name>();
         if (!ct_hist_active_[idx]) {
@@ -577,7 +554,7 @@ class StatsRegistry : public TimerRegistry {
 // ─────────────────────────────────────────────────────────────────────────────
 // CtStatID — maps a compile-time hash to a unique sequential stat index.
 //
-// Instantiated once per unique ct_string across the whole program.
+// Instantiated once per unique CTString across the whole program.
 // The static value is assigned at program startup via StatsRegistry::assign_stat_id().
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -594,7 +571,7 @@ const std::size_t CtStatID<Hash>::value = StatsRegistry::assign_stat_id(Hash);
 //   auto c = make_scoped_counter<"active_requests">(reg);
 // ─────────────────────────────────────────────────────────────────────────────
 
-template <ct_string Name>
+template <CTString Name>
 [[nodiscard]] auto make_scoped_counter(StatsRegistry& reg) {
     struct CtScopedCounter {
         std::atomic<int64_t>* ptr_;

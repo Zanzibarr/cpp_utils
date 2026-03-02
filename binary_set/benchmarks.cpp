@@ -1,6 +1,6 @@
 /**
  * @file bench_binary_set.cpp
- * @brief Extensive benchmarks for BinarySet and BSSearcher.
+ * @brief Extensive benchmarks for BinarySet.
  *
  * Every operation is compared against the most natural STL alternative.
  * The goal is to answer: "what do I pay / gain by using BinarySet instead
@@ -30,7 +30,6 @@
  *   5   In-place algebra        — |=, &=, -=, ^=
  *   6   Subset / superset tests — subset_of, superset_of, intersects
  *   7   Iteration               — range-for over all elements
- *   8   BSSearcher              — add, remove, find_subsets vs brute-force
  */
 
 #include <algorithm>

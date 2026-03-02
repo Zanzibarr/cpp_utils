@@ -2,38 +2,29 @@
 
 /**
  * @file binary_set.hxx
- * @brief Compact binary set and related classes
+ * @brief Compact bitset-backed set for small non-negative integers.
  * @version 1.1.0
+ *
+ * @details
+ * `BinarySet` stores a dense set of non-negative integers in a flat array
+ * of `uint64_t` words.  All single-element operations (`add`, `remove`,
+ * `contains`) are O(1) bit-manipulation with no branching on the value.
+ *
+ * Set-algebra operators (`&`, `|`, `^`, `-`) operate word-at-a-time using
+ * SIMD-friendly loops; `std::popcount` / `std::countr_zero` (C++20) handle
+ * cardinality and iteration.  An iterator class supports range-for by
+ * scanning for set bits via the `x & (x-1)` trick.
+ *
+ * Key design choices:
+ *   - Capacity is fixed at construction time (rounded up to the next word).
+ *   - `resize()` is provided but reallocates, so it is not a hot-path op.
+ *   - The class deliberately avoids `std::bitset` to allow runtime-sized
+ *     capacity and to expose the word array for low-level operations.
  *
  * @author Matteo Zanella <matteozanella2@gmail.com>
  * Copyright 2026 Matteo Zanella
  *
  * SPDX-License-Identifier: MIT
- *
- * =============================================================================
- * DESIGN OVERVIEW
- * =============================================================================
- *
- * BinarySet
- * ----------
- * A space-efficient set of unsigned integers over a fixed universe [0, N-1],
- * backed by a tightly-packed bit-array stored in 64-bit words (chunks).
- * Each bit position i encodes element presence: 1 = present, 0 = absent.
- *
- * Requires C++20 (std::popcount, std::countr_zero, concepts, [[nodiscard]]).
- *
- * BSSearcher
- * -----------
- * A binary-tree structure for fast subset queries over a collection of
- * BinarySets.  The tree has depth = capacity; each left edge encodes "element
- * absent", each right edge "element present".  find_subsets walks the tree
- * level-by-level, pruning branches that cannot possibly match the query.
- *
- * The node-pointer traversal now reuses pre-allocated vectors across calls
- * when invoked through find_subsets_reuse(), reducing heap pressure in hot
- * loops.
- *
- * =============================================================================
  */
 
 #include <algorithm>  // std::all_of, std::fill, std::find
@@ -46,9 +37,9 @@
 #include <string>     // std::string
 #include <vector>     // std::vector
 
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // Internal constants
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 namespace detail {
 inline constexpr unsigned int CHUNK_BITS = 64U;          ///< Bits per storage word
 using chunk_t = uint64_t;                                ///< Storage word type
@@ -56,9 +47,9 @@ inline constexpr chunk_t CHUNK_ALL = ~chunk_t{0};        ///< All bits set
 inline constexpr std::size_t INITIAL_NODE_RESERVE = 16;  ///< Initial capacity for node vectors
 }  // namespace detail
 
-// ===========================================================================
+// ═══════════════════════════════════════════════════════════════════════════
 //  BinarySet
-// ===========================================================================
+// ═══════════════════════════════════════════════════════════════════════════
 
 /**
  * @brief A space-efficient set of unsigned integers over a fixed universe.
@@ -100,9 +91,9 @@ class BinarySet {
     // Forward declaration for begin()/end()
     class iterator;
 
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
     // Construction
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
 
     /**
      * @brief Default constructor — creates an unusable empty set with capacity 0.
@@ -142,9 +133,9 @@ class BinarySet {
         }
     }
 
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
     // Element mutation
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
 
     /**
      * @brief Inserts @p element into the set.
@@ -208,9 +199,9 @@ class BinarySet {
         size_ = capacity_;
     }
 
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
     // Element queries
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
 
     /**
      * @brief Tests whether @p element is in the set.
@@ -236,9 +227,9 @@ class BinarySet {
      */
     [[nodiscard]] auto operator[](unsigned int element) const -> bool { return contains(element); }
 
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
     // Set-membership queries
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
 
     /**
      * @brief Tests whether every element of @p other is also in this set.
@@ -295,9 +286,9 @@ class BinarySet {
         return false;
     }
 
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
     // Capacity and size
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
 
     /**
      * @brief Returns the fixed universe size (maximum number of elements).
@@ -320,9 +311,9 @@ class BinarySet {
      */
     [[nodiscard]] auto empty() const noexcept -> bool { return size_ == 0; }
 
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
     // Bulk conversion
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
 
     /**
      * @brief Returns all present elements as a sorted vector.
@@ -373,9 +364,9 @@ class BinarySet {
      */
     friend auto operator<<(std::ostream& ostr, const BinarySet& bin_set) -> std::ostream& { return ostr << static_cast<std::string>(bin_set); }
 
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
     // Set algebra — non-mutating
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
 
     /**
      * @brief Returns the intersection of *this and @p other  (A ∩ B).
@@ -473,9 +464,9 @@ class BinarySet {
         return result;
     }
 
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
     // Set algebra — mutating (in-place)
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
 
     /**
      * @brief In-place intersection  (*this = *this ∩ other).
@@ -537,9 +528,9 @@ class BinarySet {
         return *this;
     }
 
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
     // Equality
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
 
     /**
      * @brief Tests whether *this and @p other contain exactly the same elements.
@@ -563,9 +554,9 @@ class BinarySet {
         return chunks_ != other.chunks_;
     }
 
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
     // Iteration
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
 
     /**
      * @brief Returns a forward iterator to the smallest element in the set.
@@ -577,7 +568,7 @@ class BinarySet {
      *         empty.
      */
     [[nodiscard]] auto begin() const noexcept -> iterator {
-        return iterator{this, 0U};  // existing signature, hits begin constructor
+        return iterator{this, 0U};  // 2-arg begin-constructor overload
     }
 
     /**
@@ -589,9 +580,9 @@ class BinarySet {
         return iterator{this, capacity_, true};  // end_tag overload
     }
 
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
     // Iterator
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
 
     /**
      * @brief Forward iterator over elements present in the set.
@@ -678,9 +669,9 @@ class BinarySet {
     };
 
    private:
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
     // Internal helpers
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
 
     static auto chunks_needed(unsigned int capacity) noexcept -> std::size_t {
         return (static_cast<std::size_t>(capacity) + detail::CHUNK_BITS - 1) / detail::CHUNK_BITS;
@@ -743,9 +734,9 @@ class BinarySet {
         }
     }
 
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
     // Data members
-    // -----------------------------------------------------------------------
+    // ───────────────────────────────────────────────────────────────────────
     unsigned int capacity_{0};
     std::size_t size_{0};
     std::vector<detail::chunk_t> chunks_;

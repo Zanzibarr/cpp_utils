@@ -7,13 +7,13 @@ void simulate_database_work(bool triggerError) {
 
     try {
         // 1. Always runs (Cleanup)
-        ScopeGuard cleanup = ScopeGuard([]() -> void { std::cout << "[EXIT] Closing database connection.\n"; }, ScopeStrategy::Exit);
+        ScopeGuard cleanup = ScopeGuard([]() -> void { std::cout << "[EXIT] Closing database connection.\n"; }, ScopeStrategy::EXIT);
 
         // 2. Runs only on failure (Rollback)
-        ScopeGuard rollback = ScopeGuard([]() -> void { std::cout << "[FAIL] Rolling back changes to stable state!\n"; }, ScopeStrategy::Fail);
+        ScopeGuard rollback = ScopeGuard([]() -> void { std::cout << "[FAIL] Rolling back changes to stable state!\n"; }, ScopeStrategy::FAIL);
 
         // 3. Runs only on success (Commit)
-        ScopeGuard commit = ScopeGuard([]() -> void { std::cout << "[SUCCESS] Transaction logged to permanent storage.\n"; }, ScopeStrategy::Success);
+        ScopeGuard commit = ScopeGuard([]() -> void { std::cout << "[SUCCESS] Transaction logged to permanent storage.\n"; }, ScopeStrategy::SUCCESS);
 
         std::cout << "Step 1: Modifying rows...\n";
         if (triggerError) {

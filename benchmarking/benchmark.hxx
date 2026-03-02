@@ -2,8 +2,27 @@
 
 /**
  * @file benchmark.hxx
- * @brief Simple benchmarking framework with statistical output and colored reporting.
+ * @brief Micro-benchmark framework with per-iteration timing and statistical output.
  * @version 1.0.0
+ *
+ * @details
+ * Benchmarks are registered with `BENCH_SUITE` / `BENCH_CASE` macros at
+ * static-init time and run via `bench_registry::instance().run_all()`.
+ *
+ * Each benchmark receives a `bench_state&` whose range-for loop records
+ * one nanosecond sample per iteration (same idiom as Google Benchmark):
+ * @code
+ *   BENCH_CASE("my bench") {
+ *       for (auto _ : state) { DoNotOptimize(my_function()); }
+ *   }
+ * @endcode
+ *
+ * After all iterations complete, `detail::compute_result()` derives mean,
+ * median, stddev, min, and max from the raw sample vector.  Results are
+ * printed in a colour-coded table with auto-scaling units (ns / µs / ms / s).
+ *
+ * `DoNotOptimize()` uses inline asm constraints on GCC/Clang to prevent the
+ * compiler from eliminating the benchmarked expression.
  *
  * @author Matteo Zanella <matteozanella2@gmail.com>
  * Copyright 2026 Matteo Zanella
@@ -22,30 +41,20 @@
 #include <string_view>
 #include <vector>
 
-#ifndef _WIN32
-#include <unistd.h>
-#endif
+#include "../utilities/ansi_colors.hxx"  // TODO: Update to the actual path
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ANSI colors  (mirrors testing::color)
+// ANSI colors — thin namespace aliases over the shared ansi:: helpers
 // ─────────────────────────────────────────────────────────────────────────────
 namespace benchmark::color {
 
-inline auto enabled() -> bool {
-#ifdef _WIN32
-    return false;
-#else
-    static bool val = (isatty(fileno(stdout)) != 0);
-    return val;
-#endif
-}
-
-inline auto green(std::string_view s) -> std::string { return enabled() ? "\033[32m" + std::string(s) + "\033[0m" : std::string(s); }
-inline auto red(std::string_view s) -> std::string { return enabled() ? "\033[31m" + std::string(s) + "\033[0m" : std::string(s); }
-inline auto yellow(std::string_view s) -> std::string { return enabled() ? "\033[33m" + std::string(s) + "\033[0m" : std::string(s); }
-inline auto cyan(std::string_view s) -> std::string { return enabled() ? "\033[36m" + std::string(s) + "\033[0m" : std::string(s); }
-inline auto bold(std::string_view s) -> std::string { return enabled() ? "\033[1m" + std::string(s) + "\033[0m" : std::string(s); }
-inline auto dim(std::string_view s) -> std::string { return enabled() ? "\033[2m" + std::string(s) + "\033[0m" : std::string(s); }
+inline auto enabled() -> bool { return ansi::enabled(); }
+inline auto green(std::string_view str) -> std::string { return ansi::green(str); }
+inline auto red(std::string_view str) -> std::string { return ansi::red(str); }
+inline auto yellow(std::string_view str) -> std::string { return ansi::yellow(str); }
+inline auto cyan(std::string_view str) -> std::string { return ansi::cyan(str); }
+inline auto bold(std::string_view str) -> std::string { return ansi::bold(str); }
+inline auto dim(std::string_view str) -> std::string { return ansi::dim(str); }
 
 }  // namespace benchmark::color
 
@@ -122,10 +131,10 @@ class bench_state {
 
     auto begin() -> iterator {
         start_ = clock::now();
-        return {this, 0};
+        return {.state = this, .index = 0};
     }
 
-    auto end() -> iterator { return {this, iters_}; }
+    auto end() -> iterator { return {.state = this, .index = iters_}; }
 
     // ── results ────────────────────────────────────────────────────────────
 
@@ -141,8 +150,8 @@ class bench_state {
 
     void lap() {
         auto now = clock::now();
-        double ns = std::chrono::duration<double, std::nano>(now - start_).count();
-        samples_ns_.push_back(ns);
+        double nanos = std::chrono::duration<double, std::nano>(now - start_).count();
+        samples_ns_.push_back(nanos);
         start_ = clock::now();  // reset for next iteration
     }
 };
@@ -154,27 +163,31 @@ class bench_state {
 namespace detail {
 
 inline auto compute_result(std::string suite, std::string name, std::vector<double> samples) -> benchmark_result {
-    std::sort(samples.begin(), samples.end());
+    std::ranges::sort(samples);
 
-    const std::size_t n = samples.size();
+    const std::size_t smpl_size = samples.size();
     const double mean = [&] {
         double sum = 0;
-        for (double s : samples) sum += s;
-        return sum / static_cast<double>(n);
+        for (double samp : samples) {
+            sum += samp;
+        }
+        return sum / static_cast<double>(smpl_size);
     }();
 
-    const double median = (n % 2 == 0) ? (samples[n / 2 - 1] + samples[n / 2]) / 2.0 : samples[n / 2];
+    const double median = (smpl_size % 2 == 0) ? (samples[(smpl_size / 2) - 1] + samples[smpl_size / 2]) / 2.0 : samples[smpl_size / 2];
 
     const double variance = [&] {
         double acc = 0;
-        for (double s : samples) acc += (s - mean) * (s - mean);
-        return acc / static_cast<double>(n);
+        for (double samp : samples) {
+            acc += (samp - mean) * (samp - mean);
+        }
+        return acc / static_cast<double>(smpl_size);
     }();
 
     return benchmark_result{
         .suite = std::move(suite),
         .name = std::move(name),
-        .iterations = n,
+        .iterations = smpl_size,
         .mean_ns = mean,
         .median_ns = median,
         .stddev_ns = std::sqrt(variance),
@@ -187,17 +200,21 @@ inline auto compute_result(std::string suite, std::string name, std::vector<doub
 //
 // Chooses the most human-readable unit: ns / µs / ms / s.
 
-inline auto fmt_time(double ns) -> std::string {
+inline auto fmt_time(double nanoseconds) -> std::string {
+    constexpr double NS_PER_US = 1e3;
+    constexpr double NS_PER_MS = 1e6;
+    constexpr double NS_PER_S = 1e9;
+
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(2);
-    if (ns < 1'000.0) {
-        oss << ns << " ns";
-    } else if (ns < 1'000'000.0) {
-        oss << ns / 1e3 << " µs";
-    } else if (ns < 1'000'000'000.0) {
-        oss << ns / 1e6 << " ms";
+    if (nanoseconds < NS_PER_US) {
+        oss << nanoseconds << " ns";
+    } else if (nanoseconds < NS_PER_MS) {
+        oss << nanoseconds / NS_PER_US << " µs";
+    } else if (nanoseconds < NS_PER_S) {
+        oss << nanoseconds / NS_PER_MS << " ms";
     } else {
-        oss << ns / 1e9 << "  s";
+        oss << nanoseconds / NS_PER_S << "  s";
     }
     return oss.str();
 }
@@ -246,17 +263,9 @@ class bench_registry {
             }
 
             // ── warmup ──────────────────────────────────────────────────────
-            {
-                bench_state warmup_state(bcase.warmup);
-                for (auto _ : warmup_state) {
-                    bcase.fn(warmup_state);
-                    break;  // we only need the loop to tick once per warmup iter
-                }
-                // Simpler: just call fn directly for warmup iterations
-            }
-            for (std::size_t w = 0; w < bcase.warmup; ++w) {
-                bench_state ws(1);
-                bcase.fn(ws);
+            for (std::size_t warmup_idx = 0; warmup_idx < bcase.warmup; ++warmup_idx) {
+                bench_state warmup_state(1);
+                bcase.fn(warmup_state);
             }
 
             // ── measured run ─────────────────────────────────────────────────
@@ -281,12 +290,14 @@ class bench_registry {
         std::cout << color::bold("+-------------------------------------+\n");
     }
 
-    static void print_result(const benchmark_result& r) {
+    static void print_result(const benchmark_result& result) {
+        constexpr int NAME_COLUMN_WIDTH = 80;
         // Layout:  v  name    mean  median  stddev  [min … max]  N iters
-        std::cout << "    " << color::green("v") << "  " << std::left << std::setw(80) << r.name << color::cyan(detail::fmt_time(r.mean_ns))
-                  << color::dim("  med " + detail::fmt_time(r.median_ns)) << color::dim("  σ " + detail::fmt_time(r.stddev_ns))
-                  << color::dim("  [" + detail::fmt_time(r.min_ns) + " … " + detail::fmt_time(r.max_ns) + "]")
-                  << color::dim("  ×" + std::to_string(r.iterations)) << "\n";
+        std::cout << "    " << color::green("v") << "  " << std::left << std::setw(NAME_COLUMN_WIDTH) << result.name
+                  << color::cyan(detail::fmt_time(result.mean_ns)) << color::dim("  med " + detail::fmt_time(result.median_ns))
+                  << color::dim("  σ " + detail::fmt_time(result.stddev_ns))
+                  << color::dim("  [" + detail::fmt_time(result.min_ns) + " … " + detail::fmt_time(result.max_ns) + "]")
+                  << color::dim("  ×" + std::to_string(result.iterations)) << "\n";
     }
 
     static void print_footer(const std::vector<benchmark_result>& results) {

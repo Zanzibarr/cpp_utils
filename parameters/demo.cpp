@@ -2,7 +2,7 @@
  * demo.cpp
  * ───────────────────────────────────────────────────────────────────────────
  * A comprehensive demo for ParameterRegistry.
- * Every public API call uses the compile-time ct_string template syntax.
+ * Every public API call uses the compile-time CTString template syntax.
  * Each section is self-contained and can be read independently.
  *
  * Compile (C++20):
@@ -95,9 +95,9 @@ void demo_coercion() {
     params.set<"from_long">(1'000'000L);
     params.set<"from_longlong">(9'000'000'000LL);
 
-    std::cout << "from_short    : " << params.get<"from_short",    int64_t>() << "\n";
-    std::cout << "from_int      : " << params.get<"from_int",      int64_t>() << "\n";
-    std::cout << "from_long     : " << params.get<"from_long",     int64_t>() << "\n";
+    std::cout << "from_short    : " << params.get<"from_short", int64_t>() << "\n";
+    std::cout << "from_int      : " << params.get<"from_int", int64_t>() << "\n";
+    std::cout << "from_long     : " << params.get<"from_long", int64_t>() << "\n";
     std::cout << "from_longlong : " << params.get<"from_longlong", int64_t>() << "\n";
 
     // ── 2b. Floating-point types → double ─────────────────────────────────
@@ -107,8 +107,8 @@ void demo_coercion() {
     params.set<"from_double">(2.718281828);
     params.set<"from_ldouble">(1.41421356L);
 
-    std::cout << "from_float   : " << params.get<"from_float",   double>() << "\n";
-    std::cout << "from_double  : " << params.get<"from_double",  double>() << "\n";
+    std::cout << "from_float   : " << params.get<"from_float", double>() << "\n";
+    std::cout << "from_double  : " << params.get<"from_double", double>() << "\n";
     std::cout << "from_ldouble : " << params.get<"from_ldouble", double>() << "\n";
 
     // ── 2c. bool is matched before integral ───────────────────────────────
@@ -118,7 +118,7 @@ void demo_coercion() {
     params.set<"flag_false">(false);
 
     std::cout << std::boolalpha;
-    std::cout << "flag_true  : " << params.get<"flag_true",  bool>() << "\n";
+    std::cout << "flag_true  : " << params.get<"flag_true", bool>() << "\n";
     std::cout << "flag_false : " << params.get<"flag_false", bool>() << "\n";
 
     // ── 2d. String-like types → std::string ───────────────────────────────
@@ -128,8 +128,8 @@ void demo_coercion() {
     params.set<"from_sv">(std::string_view("world"));
     params.set<"from_stdstr">(std::string("cpp20"));
 
-    std::cout << "from_cstr   : " << params.get<"from_cstr",   std::string>() << "\n";
-    std::cout << "from_sv     : " << params.get<"from_sv",     std::string>() << "\n";
+    std::cout << "from_cstr   : " << params.get<"from_cstr", std::string>() << "\n";
+    std::cout << "from_sv     : " << params.get<"from_sv", std::string>() << "\n";
     std::cout << "from_stdstr : " << params.get<"from_stdstr", std::string>() << "\n";
 }
 
@@ -145,16 +145,16 @@ void demo_stored_as() {
     // ── 3a. Force int literal to double ───────────────────────────────────
     subsection("3a. set<name, double>(0)  — int literal forced to double");
 
-    params.set<"threshold", double>(0);      // without StoredAs this would be int64_t
+    params.set<"threshold", double>(0);  // without StoredAs this would be int64_t
     params.set<"scale", double>(1);
 
     std::cout << "threshold : " << params.get<"threshold", double>() << " (double)\n";
-    std::cout << "scale     : " << params.get<"scale",     double>() << " (double)\n";
+    std::cout << "scale     : " << params.get<"scale", double>() << " (double)\n";
 
     // ── 3b. Force double literal to int64_t (truncates) ───────────────────
     subsection("3b. set<name, int64_t>(3.9)  — double truncated to int64_t");
 
-    params.set<"max_steps", int64_t>(1e6);   // 1e6 is a double literal
+    params.set<"max_steps", int64_t>(1e6);  // 1e6 is a double literal
     params.set<"truncated", int64_t>(3.9);
 
     std::cout << "max_steps : " << params.get<"max_steps", int64_t>() << "\n";
@@ -167,7 +167,7 @@ void demo_stored_as() {
     params.set<"disabled", bool>(0);
 
     std::cout << std::boolalpha;
-    std::cout << "enabled  : " << params.get<"enabled",  bool>() << "\n";
+    std::cout << "enabled  : " << params.get<"enabled", bool>() << "\n";
     std::cout << "disabled : " << params.get<"disabled", bool>() << "\n";
 }
 
@@ -267,8 +267,8 @@ void demo_global() {
     PARAMS.set<"app.version">(1);
     PARAMS.set<"app.debug">(false);
 
-    std::cout << "app.name    : " << PARAMS.get<"app.name",    std::string>() << "\n";
-    std::cout << "app.version : " << PARAMS.get<"app.version", int64_t>()     << "\n";
+    std::cout << "app.name    : " << PARAMS.get<"app.name", std::string>() << "\n";
+    std::cout << "app.version : " << PARAMS.get<"app.version", int64_t>() << "\n";
     std::cout << "app.debug   : " << std::boolalpha << PARAMS.get<"app.debug", bool>() << "\n";
 
     PARAMS.print_report();
@@ -280,7 +280,7 @@ void demo_global() {
 
 int main() {
     std::cout << std::string(70, '-') << "\n"
-              << "  ParameterRegistry Demo (ct_string API)\n"
+              << "  ParameterRegistry Demo (CTString API)\n"
               << std::string(70, '-') << "\n";
 
     demo_basic();

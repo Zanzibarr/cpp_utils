@@ -2,8 +2,30 @@
 
 /**
  * @file timer.hxx
- * @brief Timer class and related utilities (ScopedTimer and TimerRegistry)
+ * @brief High-resolution timer with per-name statistics accumulation.
  * @version 2.0.0
+ *
+ * @details
+ * Core types:
+ *   - `timer_detail::WelfordAccumulator` — shared base implementing Welford's
+ *     online algorithm (count, total, min, max, running mean/M2, merge).
+ *     Also reused by `stats_registry.hxx` as `GaugeStats`.
+ *   - `TimerStats` — inherits `WelfordAccumulator` and adds `get_<stat><D>()`
+ *     helpers that convert the stored nanosecond values to any `std::chrono`
+ *     duration type.
+ *   - `Timer` — RAII start/stop timer; records elapsed nanoseconds into a
+ *     `TimerStats` owned by the caller.
+ *   - `TimerRegistry` — process-wide registry keyed by compile-time names
+ *     (`CTString` → FNV-1a hash → `CtSlotID`).  Uses thread-local slot
+ *     arrays for contention-free recording; slots are merged into a shared
+ *     table on `get_report()`.
+ *   - `ScopedTimer` / `make_scoped_timer()` — RAII wrappers that start a
+ *     named registry slot and stop it on destruction.
+ *
+ * The global registry is accessible via `TIMER_REG` (macro alias for
+ * `global_timer_registry()`).  Per-thread data is lazily initialized and
+ * auto-merged, so recording from multiple threads requires no locking on the
+ * hot path.
  *
  * @author Matteo Zanella <matteozanella2@gmail.com>
  * Copyright 2026 Matteo Zanella
@@ -29,7 +51,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "../ct_string/ct_string.hxx"  // TODO: ← adjust to wherever ct_string lives
+#include "../ct_string/ct_string.hxx"  // TODO: Update to the actual path
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
@@ -105,6 +127,70 @@ auto col_min(const std::vector<Row>& rows, std::function<double(const Row&)> fun
     return (best == std::numeric_limits<double>::max()) ? 1.0 : best;
 }
 
+// ── Shared Welford statistics accumulator ─────────────────────────────────────
+//
+// Core fields and methods for online mean/variance computation (Welford 1962).
+// Used by TimerStats (nanosecond timers) and stats_detail::GaugeStats
+// (arbitrary double values).  Duration-conversion accessors live only in
+// TimerStats, as they assume nanosecond-valued data.
+
+struct WelfordAccumulator {
+    std::size_t count = 0;
+    double total = 0.0;
+    double min = std::numeric_limits<double>::max();
+    double max = std::numeric_limits<double>::lowest();
+    double mean = 0.0;  // running mean
+    double M2 = 0.0;    // running sum of squared deviations
+
+    /** Records one sample, updating all running statistics. */
+    void record(double val) {
+        ++count;
+        total += val;
+        min = std::min(min, val);
+        max = std::max(max, val);
+        double delta = val - mean;
+        mean += delta / static_cast<double>(count);
+        M2 += delta * (val - mean);
+    }
+
+    /** Resets all fields to their initial values. */
+    void reset() { *this = WelfordAccumulator{}; }
+
+    /** Population variance (M2 / n). Returns 0 if fewer than 2 samples. */
+    [[nodiscard]] auto variance() const -> double { return count < 2 ? 0.0 : M2 / static_cast<double>(count); }
+    /** Sample variance (M2 / (n-1), Bessel's correction). Returns 0 if fewer than 2 samples. */
+    [[nodiscard]] auto sample_variance() const -> double { return count < 2 ? 0.0 : M2 / static_cast<double>(count - 1); }
+    /** Population standard deviation. */
+    [[nodiscard]] auto stddev() const -> double { return std::sqrt(variance()); }
+    /** Sample standard deviation (Bessel's correction). */
+    [[nodiscard]] auto sample_stddev() const -> double { return std::sqrt(sample_variance()); }
+
+    /**
+     * Parallel Welford merge — correctly combines means and variances from two
+     * independent sets without needing access to the original samples.
+     * Reference: https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Parallel_algorithm
+     */
+    void merge(const WelfordAccumulator& other) {
+        if (other.count == 0) {
+            return;
+        }
+        if (count == 0) {
+            *this = other;
+            return;
+        }
+        auto this_count = static_cast<double>(count);
+        auto other_count = static_cast<double>(other.count);
+        double combined = this_count + other_count;
+        double delta = other.mean - mean;
+        mean = mean + (delta * (other_count / combined));
+        M2 += other.M2 + (delta * delta * (this_count * other_count / combined));
+        count += other.count;
+        total += other.total;
+        min = std::min(min, other.min);
+        max = std::max(max, other.max);
+    }
+};
+
 }  // namespace timer_detail
 
 template <std::size_t Hash>
@@ -125,12 +211,14 @@ struct CtSlotID {
  */
 class Timer {
    public:
+    /** @param start_immediately If `true`, calls `start()` immediately. */
     explicit Timer(bool start_immediately = false) {
         if (start_immediately) {
             start();
         }
     }
 
+    /** Starts the timer.  No-op if already running. */
     void start() {
         if (running_) {
             return;
@@ -139,6 +227,7 @@ class Timer {
         start_tp_ = timer_detail::clock::now();
     }
 
+    /** Stops the timer and accumulates the elapsed lap into `elapsed_`. No-op if not running. */
     void stop() {
         if (!running_) {
             return;
@@ -148,6 +237,7 @@ class Timer {
         elapsed_ += last_lap_;
     }
 
+    /** Resets all state; the timer is stopped after this call. */
     void reset() {
         running_ = false;
         elapsed_ = 0.0;
@@ -155,6 +245,7 @@ class Timer {
         start_tp_ = {};
     }
 
+    /** Returns `true` if the timer is currently running. */
     [[nodiscard]] auto is_running() const -> bool { return running_; }
 
     /** Elapsed time in the requested unit. Counts live time if still running. */
@@ -189,33 +280,14 @@ class Timer {
  * Accumulates statistics over multiple start/stop cycles using Welford's
  * online algorithm. All internal state is in nanoseconds.
  *
+ * Inherits the core Welford fields and methods (record, reset, variance,
+ * stddev, merge, etc.) from timer_detail::WelfordAccumulator.  The Duration
+ * conversion accessors (get_total<D>, get_mean<D>, ...) are added here as
+ * they are specific to nanosecond-valued data.
+ *
  * Thread safety: not thread-safe on its own. Access is serialised externally.
  */
-struct TimerStats {
-    std::size_t count = 0;
-    double total = 0.0;
-    double min = std::numeric_limits<double>::max();
-    double max = std::numeric_limits<double>::lowest();
-    double mean = 0.0;  // Welford running mean (ns)
-    double M2 = 0.0;    // Welford running sum of squared deviations (ns²)
-
-    void record(double lap_ns) {
-        ++count;
-        total += lap_ns;
-        min = std::min(min, lap_ns);
-        max = std::max(max, lap_ns);
-        double delta = lap_ns - mean;
-        mean += delta / static_cast<double>(count);
-        M2 += delta * (lap_ns - mean);
-    }
-
-    void reset() { *this = TimerStats{}; }
-
-    [[nodiscard]] auto variance() const -> double { return count < 2 ? 0.0 : M2 / static_cast<double>(count); }
-    [[nodiscard]] auto sample_variance() const -> double { return count < 2 ? 0.0 : M2 / static_cast<double>(count - 1); }
-    [[nodiscard]] auto stddev() const -> double { return std::sqrt(variance()); }
-    [[nodiscard]] auto sample_stddev() const -> double { return std::sqrt(sample_variance()); }
-
+struct TimerStats : timer_detail::WelfordAccumulator {
     template <timer_detail::ValidDuration D = std::chrono::milliseconds>
     [[nodiscard]] auto get_total() const -> double {
         return timer_detail::ns_to<D>(total);
@@ -240,31 +312,6 @@ struct TimerStats {
     [[nodiscard]] auto get_sample_stddev() const -> double {
         return timer_detail::ns_to<D>(sample_stddev());
     }
-
-    /**
-     * Parallel Welford merge — correctly combines means and variances from two
-     * independent sets without needing access to the original samples.
-     * Reference: https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Parallel_algorithm
-     */
-    void merge(const TimerStats& other) {
-        if (other.count == 0) {
-            return;
-        }
-        if (count == 0) {
-            *this = other;
-            return;
-        }
-        auto this_count = static_cast<double>(count);
-        auto other_count = static_cast<double>(other.count);
-        double combined = this_count + other_count;
-        double delta = other.mean - mean;
-        mean = mean + (delta * (other_count / combined));
-        M2 += other.M2 + (delta * delta * (this_count * other_count / combined));
-        count += other.count;
-        total += other.total;
-        min = std::min(min, other.min);
-        max = std::max(max, other.max);
-    }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -274,7 +321,7 @@ struct TimerStats {
 /**
  * A registry for managing multiple named timers across threads.
  *
- * All timer names are compile-time ct_string template parameters.
+ * All timer names are compile-time CTString template parameters.
  * Lookup is O(1) array indexing — no string hashing or map search at runtime.
  *
  * Performance design
@@ -310,11 +357,13 @@ class TimerRegistry {
     // ── Compile-time timer limit ──────────────────────────────────────────────
     // Maximum number of distinct compile-time timer names across the whole
     // program. Raise if you hit the abort() in assign_id().
+    // Keep in sync with MAX_CT_STATS (stats_registry/stats_registry.hxx)
+    // and MAX_CT_PARAMS (parameters/parameters.hxx) — all default to 128.
     static constexpr std::size_t MAX_CT_TIMERS = 128;
 
     /**
      * Assigns a unique sequential slot index to a hash at static-init time.
-     * Called once per unique ct_string instantiation via CtSlotID<H>::value.
+     * Called once per unique CTString instantiation via CtSlotID<H>::value.
      * Thread-safe: uses a static atomic counter.
      */
     static auto assign_id(std::size_t /*hash*/) -> std::size_t {
@@ -350,7 +399,7 @@ class TimerRegistry {
      *   ... work ...
      *   reg.stop(slot);
      */
-    template <ct_string Name>
+    template <CTString Name>
     auto start() -> Slot* {
         constexpr std::size_t hash = hash_name(Name);
         auto& slot = ct_get_or_create_slot<hash, Name>();
@@ -371,7 +420,7 @@ class TimerRegistry {
      * Stops a compile-time named timer by name — single array index lookup.
      * Prefer stop(Slot*) in tight loops; use this for readability elsewhere.
      */
-    template <ct_string Name>
+    template <CTString Name>
     void stop() {
         const std::size_t slot_id = CtSlotID<hash_name(Name)>::value;
         stop(&thread_local_storage().ct_slots[slot_id]);
@@ -381,7 +430,7 @@ class TimerRegistry {
      * Returns true if the calling thread's timer for Name is currently running.
      * O(1), lock-free.
      */
-    template <ct_string Name>
+    template <CTString Name>
     [[nodiscard]] auto is_running() const -> bool {
         const std::size_t slot_id = CtSlotID<hash_name(Name)>::value;
         return thread_local_storage().ct_slots[slot_id].timer.is_running();
@@ -391,7 +440,7 @@ class TimerRegistry {
      * Returns elapsed time for the calling thread's timer for Name.
      * O(1), lock-free.
      */
-    template <ct_string Name, timer_detail::ValidDuration D = std::chrono::milliseconds>
+    template <CTString Name, timer_detail::ValidDuration D = std::chrono::milliseconds>
     [[nodiscard]] auto elapsed() const -> double {
         const std::size_t slot_id = CtSlotID<hash_name(Name)>::value;
         return thread_local_storage().ct_slots[slot_id].timer.elapsed<D>();
@@ -401,7 +450,7 @@ class TimerRegistry {
      * Returns a copy of the calling thread's accumulated stats for Name.
      * O(1), lock-free.
      */
-    template <ct_string Name>
+    template <CTString Name>
     [[nodiscard]] auto stats() const -> TimerStats {
         const std::size_t slot_id = CtSlotID<hash_name(Name)>::value;
         return thread_local_storage().ct_slots[slot_id].stats;
@@ -413,7 +462,7 @@ class TimerRegistry {
      * Resets all threads' timers and stats for Name.
      * The name remains registered; start<n>() can be called again immediately.
      */
-    template <ct_string Name>
+    template <CTString Name>
     void reset() {
         const std::size_t slot_id = CtSlotID<hash_name(Name)>::value;
         std::lock_guard lock(mutex_);
@@ -676,7 +725,7 @@ class TimerRegistry {
 
     // ── Compile-time slot creation ────────────────────────────────────────
 
-    template <std::size_t Hash, ct_string Name>
+    template <std::size_t Hash, CTString Name>
     auto ct_get_or_create_slot() -> Slot& {
         const std::size_t id = CtSlotID<Hash>::value;
         auto& tloc = thread_local_storage();
@@ -801,7 +850,7 @@ const std::size_t CtSlotID<Hash>::value = TimerRegistry::assign_id(Hash);
 //   auto t = make_scoped_timer<"db_query">(reg);
 // ─────────────────────────────────────────────────────────────────────────────
 
-template <ct_string Name, timer_detail::ValidDuration D = std::chrono::milliseconds>
+template <CTString Name, timer_detail::ValidDuration D = std::chrono::milliseconds>
 [[nodiscard]] auto make_scoped_timer(TimerRegistry& reg) {
     struct CtScopedTimer {
         TimerRegistry* registry_;

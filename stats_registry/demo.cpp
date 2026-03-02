@@ -2,7 +2,7 @@
  * demo.cpp
  * ───────────────────────────────────────────────────────────────────────────
  * A comprehensive demo for StatsRegistry (and its parent, TimerRegistry).
- * Every public API call uses the compile-time ct_string template syntax.
+ * Every public API call uses the compile-time CTString template syntax.
  * Each section is self-contained and can be read independently.
  *
  * Compile (C++20):
@@ -405,7 +405,7 @@ void demo_all_reports() {
 
 int main() {
     std::cout << std::string(70, '-') << "\n"
-              << "  StatsRegistry Demo (ct_string API)\n"
+              << "  StatsRegistry Demo (CTString API)\n"
               << std::string(70, '-') << "\n";
 
     demo_basic_timers();

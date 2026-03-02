@@ -2,8 +2,27 @@
 
 /**
  * @file parameters.hxx
- * @brief Compile-time named parameter registry
+ * @brief O(1) compile-time named parameter registry with type-safe get/set.
  * @version 1.0.0
+ *
+ * @details
+ * `ParameterRegistry` stores named values indexed by `CTString` literals.
+ * Each unique name is mapped at static-init time to a sequential slot index
+ * via `CtParamID<hash_name(Name)>::value`, so every `get<Name, T>()` call
+ * is a plain array lookup with no hashing or branching at runtime.
+ *
+ * Supported value types: `int64_t`, `double`, `bool`, `std::string`.
+ * Automatic coercion is applied on `set()`:
+ *   - `bool` literals → `bool` (checked before the generic integral path)
+ *   - integral types  → `int64_t`
+ *   - floating-point  → `double`
+ *   - char* / string_view → `std::string`
+ *
+ * An explicit `StoredAs` template parameter overrides the coercion, which
+ * is useful for resolving ambiguous literals (e.g. storing `0` as `double`).
+ *
+ * The global registry is accessible via `PARAMS` (macro alias for
+ * `global_params()`).
  *
  * @author Matteo Zanella <matteozanella2@gmail.com>
  * Copyright 2026 Matteo Zanella
@@ -22,7 +41,7 @@
 #include <variant>
 #include <vector>
 
-#include "../ct_string/ct_string.hxx"
+#include "../ct_string/ct_string.hxx"  // TODO: Update to the actual path
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
@@ -99,11 +118,13 @@ class ParameterRegistry {
 
     // Maximum number of distinct compile-time parameter names across the whole
     // program. Raise if you hit the abort() in assign_param_id().
+    // Keep in sync with MAX_CT_TIMERS (timer/timer.hxx)
+    // and MAX_CT_STATS (stats_registry/stats_registry.hxx) — all default to 128.
     static constexpr std::size_t MAX_CT_PARAMS = 128;
 
     /**
      * Assigns a unique sequential index to a compile-time parameter hash.
-     * Called once per unique ct_string at static-init time via CtParamID<H>::value.
+     * Called once per unique CTString at static-init time via CtParamID<H>::value.
      * Thread-safe via a static atomic counter.
      */
     static auto assign_param_id(std::size_t /*hash*/) -> std::size_t {
@@ -129,14 +150,14 @@ class ParameterRegistry {
      * Stores a value for compile-time name Name.
      * Calling set() again for the same name overwrites the previous value.
      *
-     * @tparam Name      Compile-time parameter name (ct_string).
+     * @tparam Name      Compile-time parameter name (CTString).
      * @tparam StoredAs  Optional explicit target type (int64_t, double, bool, std::string).
      *                   When omitted (default void), the stored type is auto-coerced from T.
      *                   Use this to resolve ambiguous literals, e.g.:
      *                     params.set<"threshold", double>(0);  // 0 is int, but stored as double
      * @tparam T         Deduced value type — must satisfy param_detail::SupportedParamType.
      */
-    template <ct_string Name, param_detail::ValidStoredType StoredAs = void, param_detail::SupportedParamType T>
+    template <CTString Name, param_detail::ValidStoredType StoredAs = void, param_detail::SupportedParamType T>
     void set(T&& value) {
         using D = std::decay_t<T>;
         Value stored;
@@ -179,7 +200,7 @@ class ParameterRegistry {
      * @throws std::out_of_range       if Name has not been set.
      * @throws std::bad_variant_access if T does not match the stored type.
      */
-    template <ct_string Name, typename T>
+    template <CTString Name, typename T>
     [[nodiscard]] auto get() const -> const T& {
         const std::size_t idx = CtParamID<hash_name(Name)>::value;
         const auto& slot = slots_[idx];
@@ -192,7 +213,7 @@ class ParameterRegistry {
     /**
      * Returns true if a value has been stored for Name.
      */
-    template <ct_string Name>
+    template <CTString Name>
     [[nodiscard]] auto has() const noexcept -> bool {
         return slots_[CtParamID<hash_name(Name)>::value].active;
     }
@@ -301,7 +322,7 @@ class ParameterRegistry {
 // ─────────────────────────────────────────────────────────────────────────────
 // CtParamID — maps a compile-time hash to a unique sequential parameter index.
 //
-// Instantiated once per unique ct_string across the whole program.
+// Instantiated once per unique CTString across the whole program.
 // The static value is assigned at program startup via ParameterRegistry::assign_param_id().
 // ─────────────────────────────────────────────────────────────────────────────
 

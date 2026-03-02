@@ -68,7 +68,7 @@ bool process_file(const File& file, std::chrono::seconds local_limit) {
     // Simulate processing in 3 chunks.
     for (int chunk = 1; chunk <= 3; ++chunk) {
         if (!process_chunk(local, file.processing_ms / 3, file.processing_ms / 2)) {
-            if (CHECK_STOP())
+            if (LIMITS_CHECK_STOP())
                 std::cout << std::format("  [{}]  {} — STOPPED (global limit reached)\n", elapsed(), file.name);
             else
                 std::cout << std::format("  [{}]  {} — TIMED OUT (exceeded {}s local limit)\n", elapsed(), file.name, local_limit.count());
@@ -126,7 +126,7 @@ int main() {
     int ok = 0, timed_out = 0, aborted = 0;
 
     for (const auto& file : files) {
-        if (CHECK_STOP()) {
+        if (LIMITS_CHECK_STOP()) {
             std::cout << std::format("  [{}]  skipping {} (global limit already reached)\n", elapsed(), file.name);
             ++aborted;
             continue;
@@ -136,7 +136,7 @@ int main() {
 
         if (success)
             ++ok;
-        else if (CHECK_STOP())
+        else if (LIMITS_CHECK_STOP())
             ++aborted;
         else
             ++timed_out;

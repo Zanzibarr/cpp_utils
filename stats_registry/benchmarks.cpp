@@ -1,6 +1,6 @@
 /**
  * @file bench_stats_registry.cpp
- * @brief Benchmarks for TimerRegistry and StatsRegistry — ct_string API.
+ * @brief Benchmarks for TimerRegistry and StatsRegistry — CTString API.
  *
  * Build (C++20):
  *   g++ -std=c++20 -O2 -pthread bench_stats_registry.cpp -o bench_stats && ./bench_stats
@@ -12,7 +12,7 @@
  * ─────────
  *  0  Raw baselines          — minimum cost of the underlying primitives
  *  1  Timer (Timer class)    — start/stop/elapsed on the standalone Timer
- *  2  TimerRegistry          — ct_string start/stop, handle-based, scoped
+ *  2  TimerRegistry          — CTString start/stop, handle-based, scoped
  *  3  make_scoped_timer      — RAII overhead on top of TimerRegistry
  *  4  ScopedTimer            — standalone (no registry)
  *  5  Counters               — inc/dec/set/get, cached ref, scoped
@@ -42,7 +42,7 @@ using clk = std::chrono::steady_clock;
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared pre-warmed registry
 //
-// Every ct_string name used in a benchmark must be touched here first so that
+// Every CTString name used in a benchmark must be touched here first so that
 // the first-call registration overhead (mutex + name table write) never
 // contaminates the measured hot path.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -240,10 +240,10 @@ BENCH_CASE_N("Timer::reset", 200'000) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// SUITE 2 — TimerRegistry — ct_string API, single thread
+// SUITE 2 — TimerRegistry — CTString API, single thread
 // ═════════════════════════════════════════════════════════════════════════════
 
-BENCH_SUITE("2 · TimerRegistry — ct_string, single-threaded")
+BENCH_SUITE("2 · TimerRegistry — CTString, single-threaded")
 
 // Hot path option 1: named start + named stop (two array lookups via CtSlotID)
 BENCH_CASE_N("start<n> + stop<n> — array lookup on both sides", 200'000) {
@@ -535,7 +535,7 @@ BENCH_CASE_N("histogram_reset<n> — per-entry mutex + zero all buckets", 10'000
 
 BENCH_SUITE("8a · Counters — multi-threaded contention")
 
-// 4 threads, same ct_string key — atomic contention only (no lock)
+// 4 threads, same CTString key — atomic contention only (no lock)
 BENCH_CASE_NW("counter_inc<n> — 4 threads, same key, 500 iters each", 500, 3) {
     for (auto _ : state) {
         constexpr int N = 4, ITERS = 500;

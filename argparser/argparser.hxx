@@ -2,42 +2,34 @@
 
 /**
  * @file argparser.hxx
- * @brief Simple CLI argument parser class with optional TOML config support
- * @version 1.0.0
+ * @brief CLI argument parser with fluent builder API and optional TOML config overlay.
+ * @version 2.0.0
+ *
+ * @details
+ * `ArgParser` parses `argv` into a `ParameterRegistry` (from `parameters.hxx`)
+ * so that all argument values are accessible via compile-time names after
+ * `parse()` completes.
+ *
+ * Arguments are registered with a fluent builder:
+ * @code
+ *   parser.add<"lr">().flag("--learning-rate").type<double>().default_val(0.01)
+ *                     .help("Learning rate").required(false);
+ * @endcode
+ *
+ * Key features:
+ *   - Short (`-x`) and long (`--xx`) flag aliases, both optional.
+ *   - Positional arguments (`positional(true)`).
+ *   - Auto-generated `--help` / `-h` output with aligned columns.
+ *   - TOML config file overlay: `--config path.toml` loads a TOML file
+ *     (built-in minimal parser, no external dependencies) and merges its
+ *     values before CLI flags, so CLI always wins.
+ *   - `auto_params` struct generation via `ARGPARSER_STRUCT` macro for
+ *     zero-overhead struct-style access.
  *
  * @author Matteo Zanella <matteozanella2@gmail.com>
  * Copyright 2026 Matteo Zanella
  *
  * SPDX-License-Identifier: MIT
- *
- * TOML config support
- * -------------------
- * Pass --config <path/to/file.toml> on the CLI to load parameters from a TOML file
- *
- * Precedence (lowest → highest):
- *   1. Defaults registered with .default_val()
- *   2. Values from the TOML config file
- *   3. Values from the CLI
- *
- * TOML format expected
- * --------------------
- * Only a flat key = value section (or an optional [args] table) is supported.
- * Inline comments after a value are allowed.  Example:
- *
- *   [args]             # optional table header – parsed if present, ignored otherwise
- *   verbose = true
- *   threads = 8
- *   output  = "/tmp/out"
- *   mode    = 'w'      # single-quoted char
- *
- * Supported value literals
- *   int    : any decimal integer, optionally signed
- *   bool   : true / false
- *   char   : single character wrapped in single quotes, e.g. 'x'
- *   string : double-quoted string, e.g. "hello world"
- *   path   : double-quoted string for an arg whose type is fs::path
- *
- * CLI always wins: a CLI-supplied value overwrites whatever the TOML file set.
  */
 
 #include <algorithm>
@@ -57,7 +49,7 @@
 #include <variant>
 #include <vector>
 
-#include "../parameters/parameters.hxx"
+#include "../parameters/parameters.hxx"  // TODO: Update to the actual path
 
 namespace cli {
 
@@ -66,12 +58,17 @@ namespace fs = std::filesystem;
 // Supported value types
 using Value = std::variant<int, double, bool, char, std::string, fs::path>;
 
+/** Exception thrown when argument parsing fails (unknown flag, type mismatch, etc.). */
 struct ParseError : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
 
 // ── Argument descriptor ────────────────────────────────────────────────────
 
+/**
+ * Descriptor for a single CLI argument.  Returned by `ArgParser::add<Name, T>()`
+ * and configured via the fluent builder methods before `parse()` is called.
+ */
 struct Arg {
     std::string name;    // long name, e.g. "verbose"
     char shortName = 0;  // short name, e.g. 'v'  (0 = none)
@@ -181,18 +178,32 @@ struct Arg {
 
 // ── Parser ─────────────────────────────────────────────────────────────────
 
+/**
+ * CLI argument parser.  Register arguments with `add<Name, T>()`, then call
+ * `parse(argc, argv)`.  Parsed values are accessible via `get<Name, T>()` or
+ * through the underlying `ParameterRegistry` returned by `parameters()`.
+ */
 class ArgParser {
    public:
+    /**
+     * @param programName  Shown in the `--help` usage line.
+     * @param description  Optional one-line description shown below the usage line.
+     */
     explicit ArgParser(std::string programName, std::string description = "")
         : programName_(std::move(programName)), description_(std::move(description)) {}
 
-    // Register a new argument and return a reference for chaining.
-    // Name is a compile-time string; T is the CLI value type (int, double, bool,
-    // char, std::string, std::filesystem::path). After parse(), the value is
-    // available via get<Name, T>() and in parameters() with these coercions:
-    //   int / char → int64_t,  double → double,  bool → bool,
-    //   std::string / fs::path → std::string.
-    template <ct_string Name, typename T>
+    /**
+     * Registers an argument and returns its descriptor for fluent configuration.
+     *
+     * @tparam Name  Compile-time argument name (also the key in `ParameterRegistry`).
+     * @tparam T     CLI value type: `int`, `double`, `bool`, `char`,
+     *               `std::string`, or `std::filesystem::path`.
+     *               After `parse()`, values are stored with these coercions:
+     *               `int`/`char` → `int64_t`, `double` → `double`,
+     *               `bool` → `bool`, `string`/`path` → `std::string`.
+     * @throws ParseError if a duplicate `Name` is registered.
+     */
+    template <CTString Name, typename T>
     auto add() -> Arg& {
         const std::string name_str{Name.view()};
         if (find_arg(name_str) != nullptr) {
@@ -223,12 +234,15 @@ class ArgParser {
         return args_.back();
     }
 
-    // ── parse ──────────────────────────────────────────────────────────
-    //
-    // Precedence: defaults < TOML config < CLI flags.
-    // --config <file> is consumed before the second CLI pass so it is never
-    // forwarded to the normal argument matching logic.
-
+    /**
+     * Parses `argv` and populates the `ParameterRegistry`.
+     *
+     * Precedence (lowest → highest): defaults < TOML config < CLI flags.
+     * `--config <file>` is consumed before the second CLI pass and never
+     * forwarded to the normal argument matching logic.
+     *
+     * @throws ParseError on unknown flags, missing required args, type errors, etc.
+     */
     void parse(int argc, char* argv[]) {
         // 1. Seed defaults
         for (auto& arg : args_) {
@@ -277,21 +291,25 @@ class ArgParser {
 
     // ── accessors ──────────────────────────────────────────────────────
 
-    // Returns true if Name was parsed (from CLI, TOML, or a default value).
-    template <ct_string Name>
+    /** Returns `true` if `Name` was set (from CLI, TOML config, or a default value). */
+    template <CTString Name>
     [[nodiscard]] auto has() const -> bool {
         return reg_.has<Name>();
     }
 
-    // Returns the parsed value for Name as type T (same type as in add<Name, T>()).
-    // Coercions applied automatically on get():
-    //   int        ← int64_t (narrowing cast)
-    //   char       ← std::string (first character)
-    //   fs::path   ← std::string
-    //   others     ← direct
-    // @throws std::out_of_range       if Name was not parsed.
-    // @throws std::bad_variant_access if T does not match the stored type.
-    template <ct_string Name, typename T>
+    /**
+     * Returns the parsed value for `Name` as type `T`.
+     *
+     * Reverse coercions applied automatically:
+     *   - `int`      ← `int64_t` (narrowing cast)
+     *   - `char`     ← first character of the stored `std::string`
+     *   - `fs::path` ← stored `std::string`
+     *   - others     ← direct `std::get<T>`
+     *
+     * @throws std::out_of_range       if `Name` was not parsed.
+     * @throws std::bad_variant_access if `T` does not match the stored type.
+     */
+    template <CTString Name, typename T>
     [[nodiscard]] auto get() const -> T {
         if constexpr (std::is_same_v<T, int>) {
             return static_cast<int>(reg_.get<Name, int64_t>());
@@ -305,11 +323,12 @@ class ArgParser {
         }
     }
 
-    // Direct access to the underlying ParameterRegistry after parse().
+    /** Returns the underlying `ParameterRegistry` populated by `parse()`. */
     [[nodiscard]] auto parameters() const -> const ParameterRegistry& { return reg_; }
 
     // ── help ───────────────────────────────────────────────────────────
 
+    /** Prints formatted usage and option descriptions to stdout. */
     void print_help() const {
         constexpr std::size_t HELP_COLUMN_WIDTH = 22;
         std::cout << "Usage: " << programName_ << " [options]\n";
@@ -488,7 +507,7 @@ class ArgParser {
         return comment;
     }
 
-    // ── existing helpers (unchanged) ───────────────────────────────────
+    // ── helpers ────────────────────────────────────────────────────────
 
     auto find_arg(const std::string& key) -> Arg* {
         for (auto& arg : args_) {
@@ -523,7 +542,7 @@ class ArgParser {
         if constexpr (std::is_same_v<T, int>) {
             return Value{std::stoi(raw)};
         } else if constexpr (std::is_same_v<T, bool>) {
-            return Value{parse_bool(raw)};  // Use your existing parse_bool
+            return Value{parse_bool(raw)};
         } else if constexpr (std::is_same_v<T, char>) {
             if (raw.size() != 1) {
                 throw ParseError("Expected single character");
@@ -662,6 +681,10 @@ class ArgParser {
 
 }  // namespace cli
 
+/**
+ * Convenience wrapper: calls `parser.parse()` and returns `true` on success.
+ * On `ParseError`, prints the error and the help message, then returns `false`.
+ */
 template <typename Parser>
 inline auto argparser_parse(Parser& parser, int argc, char* argv[]) -> bool {
     try {
