@@ -152,7 +152,7 @@ class bench_state {
         auto now = clock::now();
         double nanos = std::chrono::duration<double, std::nano>(now - start_).count();
         samples_ns_.push_back(nanos);
-        start_ = clock::now();  // reset for next iteration
+        start_ = now;  // reset for next iteration
     }
 };
 
@@ -163,6 +163,10 @@ class bench_state {
 namespace detail {
 
 inline auto compute_result(std::string suite, std::string name, std::vector<double> samples) -> benchmark_result {
+    if (samples.empty()) {
+        return {.suite = suite, .name = name, .iterations = 0, .mean_ns = 0, .median_ns = 0, .stddev_ns = 0, .min_ns = 0, .max_ns = 0};
+    }
+
     std::ranges::sort(samples);
 
     const std::size_t smpl_size = samples.size();
