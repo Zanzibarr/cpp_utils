@@ -72,10 +72,10 @@ struct CTString {
  * `timer.hxx`, and `stats_registry.hxx`.  Collision probability over 64 bits
  * is negligible for any realistic number of names.
  */
-consteval auto hash_name(std::string_view s) noexcept -> std::size_t {
+consteval auto hash_name(std::string_view str) noexcept -> std::size_t {
     std::size_t hash = 14695981039346656037ULL;
-    for (char c : s) {
-        hash ^= static_cast<std::size_t>(static_cast<unsigned char>(c));
+    for (char chr : str) {
+        hash ^= static_cast<std::size_t>(static_cast<unsigned char>(chr));
         hash *= 1099511628211ULL;
     }
     return hash;
