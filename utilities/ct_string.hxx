@@ -12,7 +12,7 @@
  *
  * `hash_name(string_view)` computes a 64-bit FNV-1a hash at compile time.
  * It is used by `CtParamID`, `CtSlotID`, and `CtStatID` in
- * `parameters.hxx`, `timer.hxx`, and `stats_registry.hxx` to map a
+ * `parameters.hxx`, `argparser.hxx`, `timer.hxx`, and `stats_registry.hxx` to map a
  * `CTString` to a unique sequential array index without any runtime hash
  * table.
  *

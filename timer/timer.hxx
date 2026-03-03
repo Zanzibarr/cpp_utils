@@ -50,7 +50,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "../ct_string/ct_string.hxx"  // TODO: Update to the actual path
+#include "../utilities/ct_string.hxx"  // TODO: Update to the actual path
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
