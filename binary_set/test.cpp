@@ -887,6 +887,68 @@ TEST_CASE("operator^= throws for different capacities") {
     expect_throws(std::invalid_argument, a ^= b);
 }
 
+TEST_CASE("operator-= updates size correctly") {
+    BinarySet a(10), b(10);
+    a.add(1);
+    a.add(3);
+    a.add(5);
+    b.add(3);
+    b.add(5);
+    b.add(7);
+    a -= b;
+    expect(a.size()).to_equal(1u);
+}
+
+TEST_CASE("operator^= updates size correctly") {
+    BinarySet a(10), b(10);
+    a.add(1);
+    a.add(3);
+    a.add(5);
+    b.add(3);
+    b.add(5);
+    b.add(7);
+    a ^= b;
+    expect(a.size()).to_equal(2u);
+}
+
+TEST_CASE("operator&= with self preserves the set") {
+    BinarySet a(10);
+    a.add(1);
+    a.add(5);
+    a.add(9);
+    BinarySet original = a;
+    a &= a;
+    expect(a == original).to_be_true();
+}
+
+TEST_CASE("operator|= with self preserves the set") {
+    BinarySet a(10);
+    a.add(2);
+    a.add(6);
+    BinarySet original = a;
+    a |= a;
+    expect(a == original).to_be_true();
+}
+
+TEST_CASE("operator-= with self gives empty set") {
+    BinarySet a(10);
+    a.add(1);
+    a.add(5);
+    a.add(9);
+    a -= a;
+    expect(a.empty()).to_be_true();
+    expect(a.size()).to_equal(0u);
+}
+
+TEST_CASE("operator^= with self gives empty set") {
+    BinarySet a(10);
+    a.add(2);
+    a.add(6);
+    a ^= a;
+    expect(a.empty()).to_be_true();
+    expect(a.size()).to_equal(0u);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // operator== / operator!=
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1100,4 +1162,249 @@ TEST_CASE("pre-increment iterator advances to next element") {
     auto it = s.begin();
     ++it;
     expect(*it).to_equal(8u);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Copy and move
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_SUITE("copy and move")
+
+TEST_CASE("copy constructor creates independent copy") {
+    BinarySet s(10);
+    s.add(3);
+    s.add(7);
+    BinarySet copy = s;
+    s.add(1);
+    expect(copy.contains(1)).to_be_false();
+    expect(copy.contains(3)).to_be_true();
+    expect(copy.contains(7)).to_be_true();
+    expect(copy.size()).to_equal(2u);
+}
+
+TEST_CASE("copy constructor preserves capacity") {
+    BinarySet s(42);
+    BinarySet copy = s;
+    expect(copy.capacity()).to_equal(42u);
+}
+
+TEST_CASE("copy assignment creates independent copy") {
+    BinarySet s(10), copy(10);
+    s.add(5);
+    copy = s;
+    s.add(2);
+    expect(copy.contains(2)).to_be_false();
+    expect(copy.contains(5)).to_be_true();
+    expect(copy.size()).to_equal(1u);
+}
+
+TEST_CASE("modifying a copy does not affect the original") {
+    BinarySet s(10);
+    s.add(4);
+    BinarySet copy = s;
+    copy.add(8);
+    expect(s.contains(8)).to_be_false();
+    expect(s.size()).to_equal(1u);
+}
+
+TEST_CASE("copy of full set is independent and full") {
+    BinarySet s(20, true);
+    BinarySet copy = s;
+    expect(copy.size()).to_equal(20u);
+    for (unsigned int i = 0; i < 20; ++i) {
+        expect(copy.contains(i)).to_be_true();
+    }
+}
+
+TEST_CASE("move constructor transfers elements and capacity") {
+    BinarySet s(10);
+    s.add(3);
+    s.add(7);
+    BinarySet moved = std::move(s);
+    expect(moved.contains(3)).to_be_true();
+    expect(moved.contains(7)).to_be_true();
+    expect(moved.size()).to_equal(2u);
+    expect(moved.capacity()).to_equal(10u);
+}
+
+TEST_CASE("move assignment transfers elements and capacity") {
+    BinarySet s(10);
+    s.add(5);
+    s.add(9);
+    BinarySet target(10);
+    target = std::move(s);
+    expect(target.contains(5)).to_be_true();
+    expect(target.contains(9)).to_be_true();
+    expect(target.size()).to_equal(2u);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Default-constructed set behaviour
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_SUITE("default-constructed set behaviour")
+
+TEST_CASE("clear on default-constructed set is safe") {
+    BinarySet s;
+    expect_no_throw(s.clear());
+    expect(s.capacity()).to_equal(0u);
+    expect(s.size()).to_equal(0u);
+    expect(s.empty()).to_be_true();
+}
+
+TEST_CASE("iteration over default-constructed set yields no elements") {
+    BinarySet s;
+    int count = 0;
+    for (unsigned int elem : s) {
+        (void)elem;
+        ++count;
+    }
+    expect(count).to_equal(0);
+}
+
+TEST_CASE("begin equals end for default-constructed set") {
+    BinarySet s;
+    expect(s.begin() == s.end()).to_be_true();
+}
+
+TEST_CASE("string representation of default-constructed set is []") {
+    BinarySet s;
+    expect(static_cast<std::string>(s)).to_equal("[]");
+}
+
+TEST_CASE("two default-constructed sets are equal") {
+    BinarySet a, b;
+    expect(a == b).to_be_true();
+    expect(a != b).to_be_false();
+}
+
+TEST_CASE("default-constructed sets are mutual supersets") {
+    BinarySet a, b;
+    expect(a.superset_of(b)).to_be_true();
+    expect(b.superset_of(a)).to_be_true();
+}
+
+TEST_CASE("default-constructed sets are mutual subsets") {
+    BinarySet a, b;
+    expect(a.subset_of(b)).to_be_true();
+    expect(b.subset_of(a)).to_be_true();
+}
+
+TEST_CASE("default-constructed sets do not intersect") {
+    BinarySet a, b;
+    expect(a.intersects(b)).to_be_false();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Algebraic identities
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_SUITE("algebraic identities")
+
+TEST_CASE("De Morgan: complement of intersection equals union of complements") {
+    BinarySet a(10), b(10);
+    a.add(1); a.add(2); a.add(3);
+    b.add(2); b.add(3); b.add(4);
+    expect(!(a & b) == (!a | !b)).to_be_true();
+}
+
+TEST_CASE("De Morgan: complement of union equals intersection of complements") {
+    BinarySet a(10), b(10);
+    a.add(1); a.add(2); a.add(3);
+    b.add(2); b.add(3); b.add(4);
+    expect(!(a | b) == (!a & !b)).to_be_true();
+}
+
+TEST_CASE("intersection is associative") {
+    BinarySet a(10), b(10), c(10);
+    a.add(1); a.add(2); a.add(3);
+    b.add(2); b.add(3); b.add(4);
+    c.add(3); c.add(4); c.add(5);
+    expect(((a & b) & c) == (a & (b & c))).to_be_true();
+}
+
+TEST_CASE("union is associative") {
+    BinarySet a(10), b(10), c(10);
+    a.add(1); a.add(2);
+    b.add(3); b.add(4);
+    c.add(5); c.add(6);
+    expect(((a | b) | c) == (a | (b | c))).to_be_true();
+}
+
+TEST_CASE("symmetric difference is associative") {
+    BinarySet a(10), b(10), c(10);
+    a.add(1); a.add(2);
+    b.add(2); b.add(3);
+    c.add(3); c.add(4);
+    expect(((a ^ b) ^ c) == (a ^ (b ^ c))).to_be_true();
+}
+
+TEST_CASE("intersection distributes over union") {
+    BinarySet a(10), b(10), c(10);
+    a.add(1); a.add(2); a.add(3);
+    b.add(2); b.add(4);
+    c.add(3); c.add(4);
+    expect((a & (b | c)) == ((a & b) | (a & c))).to_be_true();
+}
+
+TEST_CASE("union distributes over intersection") {
+    BinarySet a(10), b(10), c(10);
+    a.add(1); a.add(5);
+    b.add(2); b.add(5);
+    c.add(3); c.add(5);
+    expect((a | (b & c)) == ((a | b) & (a | c))).to_be_true();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Capacity boundary edge cases
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_SUITE("capacity boundary edge cases")
+
+TEST_CASE("capacity exactly 64 fills all bits without stray bits") {
+    // mask_last_chunk() skips masking when tail == 0; this guards that branch
+    BinarySet s(64, true);
+    expect(s.size()).to_equal(64u);
+    BinarySet c = !s;
+    expect(c.size()).to_equal(0u);
+}
+
+TEST_CASE("capacity exactly 64 complement is exact") {
+    BinarySet s(64);
+    s.add(0);
+    BinarySet c = !s;
+    expect(c.size()).to_equal(63u);
+    expect(c.contains(0)).to_be_false();
+    for (unsigned int i = 1; i < 64; ++i) {
+        expect(c.contains(i)).to_be_true();
+    }
+}
+
+TEST_CASE("capacity exactly 128 fills without stray bits") {
+    BinarySet s(128, true);
+    expect(s.size()).to_equal(128u);
+    BinarySet c = !s;
+    expect(c.size()).to_equal(0u);
+}
+
+TEST_CASE("union of two full non-multiple-of-64 sets has no stray bits") {
+    // Stray bits in the last chunk of either operand would inflate size after |
+    BinarySet a(65, true), b(65, true);
+    BinarySet u = a | b;
+    expect(u.size()).to_equal(65u);
+    BinarySet c = !u;
+    expect(c.size()).to_equal(0u);
+}
+
+TEST_CASE("set operations at word boundary (bit 63/64) are correct") {
+    BinarySet a(130), b(130);
+    a.add(63);
+    a.add(64);
+    b.add(64);
+    b.add(65);
+    BinarySet s = a ^ b;
+    expect(s.contains(63)).to_be_true();
+    expect(s.contains(64)).to_be_false();
+    expect(s.contains(65)).to_be_true();
+    expect(s.size()).to_equal(2u);
 }

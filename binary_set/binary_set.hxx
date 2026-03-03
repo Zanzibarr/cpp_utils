@@ -40,10 +40,9 @@
 // Internal constants
 // ─────────────────────────────────────────────────────────────────────────────
 namespace detail {
-inline constexpr unsigned int CHUNK_BITS = 64U;          ///< Bits per storage word
-using chunk_t = uint64_t;                                ///< Storage word type
-inline constexpr chunk_t CHUNK_ALL = ~chunk_t{0};        ///< All bits set
-inline constexpr std::size_t INITIAL_NODE_RESERVE = 16;  ///< Initial capacity for node vectors
+inline constexpr unsigned int CHUNK_BITS = 64U;    ///< Bits per storage word
+using chunk_t = uint64_t;                          ///< Storage word type
+inline constexpr chunk_t CHUNK_ALL = ~chunk_t{0};  ///< All bits set
 }  // namespace detail
 
 // ═══════════════════════════════════════════════════════════════════════════
