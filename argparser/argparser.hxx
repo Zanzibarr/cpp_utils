@@ -752,8 +752,7 @@ class ArgParser {
  * Convenience wrapper: calls `parser.parse()` and returns `true` on success.
  * On `ParseError`, prints the error and the help message, then returns `false`.
  */
-template <typename Parser>
-inline auto argparser_parse(Parser& parser, int argc, char* argv[]) -> bool {
+inline auto argparser_parse(cli::ArgParser& parser, int argc, char* argv[]) -> bool {
     try {
         parser.parse(argc, argv);
         return true;
@@ -771,8 +770,8 @@ inline auto argparser_parse(Parser& parser, int argc, char* argv[]) -> bool {
  * Use a callback function (lambda, function, functor) to be called after the parsing for additional checks on the parsed parameters
  * This is supposed to be a void function, any return value will be discarded
  */
-template <typename Parser, std::invocable<Parser&> Callback>
-inline auto argparser_parse(Parser& parser, int argc, char* argv[], Callback&& callback) -> bool {
+template <std::invocable<cli::ArgParser&> Callback>
+inline auto argparser_parse(cli::ArgParser& parser, int argc, char* argv[], Callback&& callback) -> bool {
     try {
         parser.parse(argc, argv, std::forward<Callback>(callback));
         return true;
@@ -789,8 +788,7 @@ inline auto argparser_parse(Parser& parser, int argc, char* argv[], Callback&& c
  *
  * Use a callback function (std::function) to be called after the parsing for additional checks on the parsed parameters
  */
-template <typename Parser>
-inline auto argparser_parse(Parser& parser, int argc, char* argv[], std::function<void(Parser&)> callback) -> bool {
+inline auto argparser_parse(cli::ArgParser& parser, int argc, char* argv[], std::function<void(cli::ArgParser&)> callback) -> bool {
     try {
         parser.parse(argc, argv, std::move(callback));
         return true;
