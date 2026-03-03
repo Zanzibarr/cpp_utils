@@ -54,7 +54,7 @@
 namespace cli {
 
 // Supported value types
-using Value = std::variant<int, double, bool, char, std::string>;
+using Value = std::variant<int, double, bool, std::string>;
 
 /** Exception thrown when argument parsing fails (unknown flag, type mismatch, etc.). */
 struct ParseError : std::runtime_error {
@@ -76,8 +76,8 @@ struct Arg {
     std::type_index type{typeid(void)};
 
     std::optional<Value> defaultValue;
-    std::optional<Value> minValue;  // inclusive, for int/char
-    std::optional<Value> maxValue;  // inclusive, for int/char
+    std::optional<Value> minValue;  // inclusive, for int
+    std::optional<Value> maxValue;  // inclusive, for int
     std::vector<Value> choices;     // allowed values (any type)
 
     std::function<void(Value)> setter;  // populates the ParameterRegistry on parse()
@@ -145,16 +145,13 @@ struct Arg {
             }
             return Value{static_cast<double>(value)};
         } else if constexpr (std::is_integral_v<T>) {
-            if (type == typeid(char)) {
-                return Value{static_cast<char>(value)};
-            }
             if (type == typeid(int)) {
                 return Value{static_cast<int>(value)};
             }
             if (type == typeid(double)) {
                 return Value{static_cast<double>(value)};  // ← coerce int literals to double
             }
-            throw ParseError("type mismatch: expected char, int, or double");
+            throw ParseError("type mismatch: expected int or double");
         } else {
             throw ParseError("unsupported type");
         }
@@ -181,10 +178,9 @@ class ArgParser {
      * Registers an argument and returns its descriptor for fluent configuration.
      *
      * @tparam Name  Compile-time argument name (also the key in `ParameterRegistry`).
-     * @tparam T     CLI value type: `int`, `double`, `bool`, `char`,
-     *               `std::string`.
+     * @tparam T     CLI value type: `int`, `double`, `bool`, `std::string`.
      *               After `parse()`, values are stored with these coercions:
-     *               `int`/`char` → `int64_t`, `double` → `double`,
+     *               `int` → `int64_t`, `double` → `double`,
      *               `bool` → `bool`, `string`/`path` → `std::string`.
      * @throws ParseError if a duplicate `Name` is registered.
      */
@@ -206,8 +202,6 @@ class ArgParser {
                         reg_.set<Name>(std::get<double>(val));
                     } else if constexpr (std::is_same_v<T, bool>) {
                         reg_.set<Name>(std::get<bool>(val));
-                    } else if constexpr (std::is_same_v<T, char>) {
-                        reg_.set<Name>(std::string(1, std::get<char>(val)));
                     } else if constexpr (std::is_same_v<T, std::string>) {
                         reg_.set<Name>(std::get<std::string>(val));
                     }
@@ -303,8 +297,6 @@ class ArgParser {
      *
      * Reverse coercions applied automatically:
      *   - `int`      ← `int64_t` (narrowing cast)
-     *   - `char`     ← first character of the stored `std::string`
-     *   - `fs::path` ← stored `std::string`
      *   - others     ← direct `std::get<T>`
      *
      * @throws std::out_of_range       if `Name` was not parsed.
@@ -314,9 +306,6 @@ class ArgParser {
     [[nodiscard]] auto get() const -> T {
         if constexpr (std::is_same_v<T, int>) {
             return static_cast<int>(reg_.get<Name, int64_t>());
-        } else if constexpr (std::is_same_v<T, char>) {
-            const auto& str = reg_.get<Name, std::string>();
-            return str.empty() ? '\0' : str[0];
         } else {
             return reg_.get<Name, T>();  // double, bool, std::string, int64_t
         }
@@ -590,11 +579,6 @@ class ArgParser {
             return Value{std::stoi(raw)};
         } else if constexpr (std::is_same_v<T, bool>) {
             return Value{parse_bool(raw)};
-        } else if constexpr (std::is_same_v<T, char>) {
-            if (raw.size() != 1) {
-                throw ParseError("Expected single character");
-            }
-            return Value{raw[0]};
         } else if constexpr (std::is_same_v<T, std::string>) {
             return Value{raw};
         } else if constexpr (std::is_same_v<T, double>) {
@@ -621,9 +605,6 @@ class ArgParser {
             }
             if (arg.type == typeid(std::string)) {
                 return convert_to_value<std::string>(clean);
-            }
-            if (arg.type == typeid(char)) {
-                return convert_to_value<char>(clean);
             }
             if (arg.type == typeid(double)) {
                 return convert_to_value<double>(clean);  // ← was missing
@@ -658,15 +639,6 @@ class ArgParser {
                 throw ParseError(std::format("--{}: value {} above maximum {}", arg.name, double_value, std::get<double>(*arg.maxValue)));
             }
         }
-        if (std::holds_alternative<char>(val)) {
-            char char_value = std::get<char>(val);
-            if (arg.minValue && char_value < std::get<char>(*arg.minValue)) {
-                throw ParseError(std::format("--{}: char '{}' below minimum", arg.name, char_value));
-            }
-            if (arg.maxValue && char_value > std::get<char>(*arg.maxValue)) {
-                throw ParseError(std::format("--{}: char '{}' above maximum", arg.name, char_value));
-            }
-        }
     }
 
     static auto value_to_string(const Value& value) -> std::string {
@@ -696,9 +668,6 @@ class ArgParser {
         }
         if (type == typeid(bool)) {
             return "bool";
-        }
-        if (type == typeid(char)) {
-            return "char";
         }
         if (type == typeid(std::string)) {
             return "string";
