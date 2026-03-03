@@ -41,6 +41,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -333,6 +334,13 @@ struct TimerStats : timer_detail::WelfordAccumulator {
  *   - A report is requested.
  *   - A thread exits (snapshots its stats into the graveyard).
  *
+ * Per-thread storage uses a thread_local array indexed by a per-registry
+ * integer ID (assigned once at construction via an atomic counter). This
+ * replaces the previous unordered_map lookup on every hot-path call with a
+ * single array index — effectively one pointer load after the first access.
+ * Up to MAX_REGISTRIES independent TimerRegistry instances are supported
+ * (default 8). Increase the constant if you need more.
+ *
  * Preferred usage
  * ───────────────
  *   One-liner RAII — name resolved at compile time, stop is a pointer deref:
@@ -360,6 +368,11 @@ class TimerRegistry {
     // and MAX_CT_PARAMS (parameters/parameters.hxx) — all default to 128.
     static constexpr std::size_t MAX_CT_TIMERS = 128;
 
+    // Maximum number of independent TimerRegistry instances in the program.
+    // Each instance consumes one slot in the thread_local array used by
+    // thread_local_storage(). Raise if you need more than 8 registries.
+    static constexpr std::size_t MAX_REGISTRIES = 8;
+
     /**
      * Assigns a unique sequential slot index to a hash at static-init time.
      * Called once per unique CTString instantiation via CtSlotID<H>::value.
@@ -375,7 +388,12 @@ class TimerRegistry {
         return slot_id;
     }
 
-    TimerRegistry() = default;
+    TimerRegistry() : registry_id_(registry_id_counter_.fetch_add(1, std::memory_order_relaxed)) {
+        if (registry_id_ >= MAX_REGISTRIES) {
+            std::cerr << "TimerRegistry: MAX_REGISTRIES (" << MAX_REGISTRIES << ") exceeded. Increase the limit.\n";
+            std::abort();
+        }
+    }
     ~TimerRegistry() {
         std::lock_guard lock(mutex_);
         for (auto& [tid, local] : live_threads_) {
@@ -766,11 +784,17 @@ class TimerRegistry {
         return tloc.ct_slots[id];
     }
 
-    // This function cannot be made static, otherwise the thread data would be shared across different Registry instances
-    // NOLINTNEXTLINE(readability-convert-member-functions-to-static)
+    // Each registry instance has a unique registry_id_ (assigned at construction).
+    // The thread_local array is indexed by that ID — one pointer load on the hot path instead of an unordered_map hash + probe on every
+    // start()/stop() call. The problem here is that thread_local is static under the same thread: different TimerRegistry on the same thread won't be
+    // independent
     auto thread_local_storage() const -> ThreadLocal& {
-        thread_local std::unordered_map<const TimerRegistry*, ThreadLocal> tl_map;
-        return tl_map[this];
+        thread_local std::array<std::unique_ptr<ThreadLocal>, MAX_REGISTRIES> tl_ptrs{};
+        auto& ptr = tl_ptrs[registry_id_];
+        if (!ptr) [[unlikely]] {
+            ptr = std::make_unique<ThreadLocal>();
+        }
+        return *ptr;
     }
 
     // ── Print helpers ─────────────────────────────────────────────────────
@@ -842,6 +866,11 @@ class TimerRegistry {
     // Maps compile-time slot IDs back to their string names (for reporting).
     // Written once at first use, read-only after that.
     std::array<std::string, MAX_CT_TIMERS> ct_names_;
+
+    // ── Per-registry identity — drives the thread_local_storage() index ───
+    // Assigned once at construction; stable for the lifetime of the registry.
+    inline static std::atomic<std::size_t> registry_id_counter_{0};
+    const std::size_t registry_id_;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
