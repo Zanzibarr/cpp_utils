@@ -25,7 +25,7 @@ auto main(int argc, char* argv[]) -> int {
         .default_val(std::string("fast"))
         .allow<std::string>({"fast", "slow", "turbo"});
     parser.add<"delimiter", char>().shorthand('d').description("Single character delimiter").default_val(',').min('!').max('~');
-    parser.add<"output", std::filesystem::path>().shorthand('o').description("Output file path").default_val(std::filesystem::path("out.txt"));
+    parser.add<"output", std::string>().shorthand('o').description("Output file path").default_val("out.txt");
     parser.add<"name", std::string>().shorthand('N').description("Your name").require();
     parser.add<"weight", double>().shorthand('w').description("A double variable").default_val(.5).min(-10).max(10);
 
@@ -39,7 +39,7 @@ auto main(int argc, char* argv[]) -> int {
     bool verbose = parser.get<"verbose", bool>();
     std::string mode = parser.get<"mode", std::string>();
     char delimiter = parser.get<"delimiter", char>();
-    auto output = parser.get<"output", std::filesystem::path>();
+    auto output = parser.get<"output", std::string>();
     std::string name = parser.get<"name", std::string>();
     double weight = parser.get<"weight", double>();
 

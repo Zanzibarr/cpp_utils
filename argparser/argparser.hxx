@@ -35,7 +35,6 @@
 #include <algorithm>
 #include <concepts>
 #include <cstdlib>
-#include <filesystem>
 #include <format>
 #include <fstream>
 #include <functional>
@@ -54,10 +53,8 @@
 
 namespace cli {
 
-namespace fs = std::filesystem;
-
 // Supported value types
-using Value = std::variant<int, double, bool, char, std::string, fs::path>;
+using Value = std::variant<int, double, bool, char, std::string>;
 
 /** Exception thrown when argument parsing fails (unknown flag, type mismatch, etc.). */
 struct ParseError : std::runtime_error {
@@ -137,20 +134,7 @@ struct Arg {
                 throw ParseError("type mismatch: expected bool");
             }
             return Value{value};
-        } else if constexpr (std::is_same_v<T, fs::path>) {
-            if (type != typeid(fs::path)) {
-                throw ParseError("type mismatch: expected path");
-            }
-            return Value{value};
-        } else if constexpr (std::is_convertible_v<T, fs::path> && !std::is_convertible_v<T, std::string>) {
-            if (type != typeid(fs::path)) {
-                throw ParseError("type mismatch: expected path");
-            }
-            return Value{fs::path{value}};
         } else if constexpr (std::is_convertible_v<T, std::string>) {
-            if (type == typeid(fs::path)) {
-                return Value{fs::path{value}};
-            }
             if (type != typeid(std::string)) {
                 throw ParseError("type mismatch: expected string");
             }
@@ -198,7 +182,7 @@ class ArgParser {
      *
      * @tparam Name  Compile-time argument name (also the key in `ParameterRegistry`).
      * @tparam T     CLI value type: `int`, `double`, `bool`, `char`,
-     *               `std::string`, or `std::filesystem::path`.
+     *               `std::string`.
      *               After `parse()`, values are stored with these coercions:
      *               `int`/`char` → `int64_t`, `double` → `double`,
      *               `bool` → `bool`, `string`/`path` → `std::string`.
@@ -226,8 +210,6 @@ class ArgParser {
                         reg_.set<Name>(std::string(1, std::get<char>(val)));
                     } else if constexpr (std::is_same_v<T, std::string>) {
                         reg_.set<Name>(std::get<std::string>(val));
-                    } else if constexpr (std::is_same_v<T, fs::path>) {
-                        reg_.set<Name>(std::get<fs::path>(val).string());
                     }
                 },
         });
@@ -335,8 +317,6 @@ class ArgParser {
         } else if constexpr (std::is_same_v<T, char>) {
             const auto& str = reg_.get<Name, std::string>();
             return str.empty() ? '\0' : str[0];
-        } else if constexpr (std::is_same_v<T, fs::path>) {
-            return fs::path(reg_.get<Name, std::string>());
         } else {
             return reg_.get<Name, T>();  // double, bool, std::string, int64_t
         }
@@ -619,8 +599,6 @@ class ArgParser {
             return Value{raw};
         } else if constexpr (std::is_same_v<T, double>) {
             return Value{std::stod(raw)};
-        } else if constexpr (std::is_same_v<T, fs::path>) {
-            return Value{fs::path{raw}};
         }
 
         throw ParseError("Unsupported type");
@@ -646,9 +624,6 @@ class ArgParser {
             }
             if (arg.type == typeid(char)) {
                 return convert_to_value<char>(clean);
-            }
-            if (arg.type == typeid(fs::path)) {
-                return convert_to_value<fs::path>(clean);
             }
             if (arg.type == typeid(double)) {
                 return convert_to_value<double>(clean);  // ← was missing
@@ -704,8 +679,6 @@ class ArgParser {
                     return std::string(1, val);
                 } else if constexpr (std::is_same_v<T, std::string>) {
                     return val;
-                } else if constexpr (std::is_same_v<T, fs::path>) {
-                    return val.string();
                 } else if constexpr (std::is_same_v<T, double>) {
                     std::ostringstream oss;
                     oss << val;
@@ -729,9 +702,6 @@ class ArgParser {
         }
         if (type == typeid(std::string)) {
             return "string";
-        }
-        if (type == typeid(fs::path)) {
-            return "path";
         }
         if (type == typeid(double)) {
             return "double";
