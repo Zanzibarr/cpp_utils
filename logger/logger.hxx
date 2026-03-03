@@ -44,20 +44,6 @@
 
 #include "../utilities/ansi_colors.hxx"  // TODO: Update to the actual path
 
-// ── Internal clock ────────────────────────────────────────────────────────────
-
-namespace logger_detail {
-/// Returns seconds elapsed since the first call (program-relative wall time).
-inline auto elapsed_seconds() noexcept -> double {
-    using clock = std::chrono::steady_clock;
-    using dseconds = std::chrono::duration<double>;
-    static const auto start = clock::now();
-    return std::chrono::duration_cast<dseconds>(clock::now() - start).count();
-}
-}  // namespace logger_detail
-
-// ansi::codes (from utilities/ansi_colors.hxx) provides the escape constants.
-
 // ── Logger ───────────────────────────────────────────────────────────────────
 
 /**
@@ -141,7 +127,7 @@ class Logger {
         bool active_;  // false → every operator<< is a no-op
     };
 
-    Logger() = default;
+    Logger() { start_ = std::chrono::steady_clock::now(); };
     Logger(const Logger &) = delete;
     Logger(Logger &&) = delete;
     auto operator=(const Logger &) -> Logger & = delete;
@@ -375,7 +361,9 @@ class Logger {
             return;
         }
 
-        record rec{.message = message, .lvl = lvl, .elapsed = logger_detail::elapsed_seconds(), .thread_id = current_thread_id()};
+        double elapsed_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_).count();
+
+        record rec{.message = message, .lvl = lvl, .elapsed = elapsed_s, .thread_id = current_thread_id()};
 
         if (async_mode_) {
             {
@@ -453,6 +441,7 @@ class Logger {
     std::condition_variable queue_cv_;
     std::queue<record> queue_;
     std::atomic<bool> worker_running_{false};
+    std::chrono::steady_clock::time_point start_;
 };
 
 inline auto default_logger() -> Logger & {
