@@ -33,6 +33,7 @@
  */
 
 #include <algorithm>
+#include <concepts>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
@@ -86,7 +87,7 @@ struct Arg {
 
     // ── fluent builders ────────────────────────────────────────────────
     auto shorthand(char short_name) -> Arg& {
-        if (short_name == '0') {
+        if (short_name == 0) {
             throw ParseError("Cannot set 0 as short name");
         }
         shortName = short_name;
@@ -235,6 +236,30 @@ class ArgParser {
     }
 
     /**
+     * Manually set a parameter value
+     *
+     * @throws ParseError if the parameter doesn't exist
+     */
+    template <CTString Name, typename T>
+    auto set(T value) -> void {
+        const std::string name_str{Name.view()};
+
+        // Find the registered argument
+        Arg* arg = find_arg(name_str);
+        if (arg == nullptr) {
+            throw ParseError(std::format("unknown argument: --{}", name_str));
+        }
+
+        // Reuse existing normalization + validation logic
+        Value normalized = arg->normalize_and_store(value);
+        validate(*arg, normalized);
+
+        // Update both stores
+        parsed_[name_str] = normalized;  // ← raw map
+        arg->setter(normalized);         // ← ParameterRegistry
+    }
+
+    /**
      * Parses `argv` and populates the `ParameterRegistry`.
      *
      * Precedence (lowest → highest): defaults < TOML config < CLI flags.
@@ -243,49 +268,43 @@ class ArgParser {
      *
      * @throws ParseError on unknown flags, missing required args, type errors, etc.
      */
-    void parse(int argc, char* argv[]) {
-        // 1. Seed defaults
-        for (auto& arg : args_) {
-            if (arg.defaultValue) {
-                parsed_[arg.name] = *arg.defaultValue;
-            }
-        }
 
-        std::vector<std::string> tokens;
-        for (int i = 1; i < argc; ++i) {
-            tokens.emplace_back(argv[i]);
-        }
+    void parse(int argc, char* argv[]) { parse_impl(argc, argv); }
 
-        // 2. First pass: find --config and load TOML (values go into parsed_
-        //    but will be overwritten by any CLI flag in the second pass).
-        std::vector<std::string> remaining;
-        for (std::size_t i = 0; i < tokens.size(); ++i) {
-            if (tokens[i] == "--config" || tokens[i] == "-C") {
-                if (i + 1 >= tokens.size()) {
-                    throw ParseError("--config requires a file path");
-                }
-                load_toml(tokens[++i]);
-            } else {
-                remaining.push_back(tokens[i]);
-            }
-        }
+    /**
+     * Parses `argv` and populates the `ParameterRegistry`.
+     *
+     * Precedence (lowest → highest): defaults < TOML config < CLI flags.
+     * `--config <file>` is consumed before the second CLI pass and never
+     * forwarded to the normal argument matching logic.
+     *
+     * Add a callback (lambda, function, functor) to be called after parsing (for additional checks on the parsed parameters)
+     *
+     * @throws ParseError on unknown flags, missing required args, type errors, etc.
+     */
 
-        // 3. Second pass: apply CLI flags (override TOML values)
-        parse_cli_arguments(remaining);
+    template <std::invocable<ArgParser&> Callback>
+    void parse(int argc, char* argv[], Callback&& callback) {
+        parse_impl(argc, argv);
+        std::invoke(std::forward<Callback>(callback), *this);
+    }
 
-        // 4. Check required
-        for (auto& arg : args_) {
-            if (arg.required && !parsed_.contains(arg.name)) {
-                throw ParseError(std::format("required argument missing: --{}", arg.name));
-            }
-        }
+    /**
+     * Parses `argv` and populates the `ParameterRegistry`.
+     *
+     * Precedence (lowest → highest): defaults < TOML config < CLI flags.
+     * `--config <file>` is consumed before the second CLI pass and never
+     * forwarded to the normal argument matching logic.
+     *
+     * Add a callback (std::function) to be called after parsing (for additional checks on the parsed parameters)
+     *
+     * @throws ParseError on unknown flags, missing required args, type errors, etc.
+     */
 
-        // 5. Populate the compile-time ParameterRegistry from all parsed values.
-        for (const auto& arg : args_) {
-            auto iter = parsed_.find(arg.name);
-            if (iter != parsed_.end()) {
-                arg.setter(iter->second);
-            }
+    void parse(int argc, char* argv[], std::function<void(ArgParser&)> callback) {
+        parse_impl(argc, argv);
+        if (callback) {
+            std::invoke(callback, *this);
         }
     }
 
@@ -377,6 +396,54 @@ class ArgParser {
     }
 
    private:
+    // ── CLI parser ─────────────────────────────────────────────────────
+
+    void parse_impl(int argc, char* argv[]) {
+        // 1. Seed defaults
+        for (auto& arg : args_) {
+            if (arg.defaultValue) {
+                parsed_[arg.name] = *arg.defaultValue;
+            }
+        }
+
+        std::vector<std::string> tokens;
+        for (int i = 1; i < argc; ++i) {
+            tokens.emplace_back(argv[i]);
+        }
+
+        // 2. First pass: find --config and load TOML (values go into parsed_
+        //    but will be overwritten by any CLI flag in the second pass).
+        std::vector<std::string> remaining;
+        for (std::size_t i = 0; i < tokens.size(); ++i) {
+            if (tokens[i] == "--config" || tokens[i] == "-C") {
+                if (i + 1 >= tokens.size()) {
+                    throw ParseError("--config requires a file path");
+                }
+                load_toml(tokens[++i]);
+            } else {
+                remaining.push_back(tokens[i]);
+            }
+        }
+
+        // 3. Second pass: apply CLI flags (override TOML values)
+        parse_cli_arguments(remaining);
+
+        // 4. Check required
+        for (auto& arg : args_) {
+            if (arg.required && !parsed_.contains(arg.name)) {
+                throw ParseError(std::format("required argument missing: --{}", arg.name));
+            }
+        }
+
+        // 5. Populate the compile-time ParameterRegistry from all parsed values.
+        for (const auto& arg : args_) {
+            auto iter = parsed_.find(arg.name);
+            if (iter != parsed_.end()) {
+                arg.setter(iter->second);
+            }
+        }
+    }
+
     // ── CLI argument processor ─────────────────────────────────────────
 
     void parse_cli_arguments(const std::vector<std::string>& remaining) {
@@ -689,6 +756,43 @@ template <typename Parser>
 inline auto argparser_parse(Parser& parser, int argc, char* argv[]) -> bool {
     try {
         parser.parse(argc, argv);
+        return true;
+    } catch (const cli::ParseError& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        parser.print_help();
+        return false;
+    }
+}
+
+/**
+ * Convenience wrapper: calls `parser.parse()` and returns `true` on success.
+ * On `ParseError`, prints the error and the help message, then returns `false`.
+ *
+ * Use a callback function (lambda, function, functor) to be called after the parsing for additional checks on the parsed parameters
+ * This is supposed to be a void function, any return value will be discarded
+ */
+template <typename Parser, std::invocable<Parser&> Callback>
+inline auto argparser_parse(Parser& parser, int argc, char* argv[], Callback&& callback) -> bool {
+    try {
+        parser.parse(argc, argv, std::forward<Callback>(callback));
+        return true;
+    } catch (const cli::ParseError& e) {
+        std::cerr << "Error: " << e.what() << "\n";
+        parser.print_help();
+        return false;
+    }
+}
+
+/**
+ * Convenience wrapper: calls `parser.parse()` and returns `true` on success.
+ * On `ParseError`, prints the error and the help message, then returns `false`.
+ *
+ * Use a callback function (std::function) to be called after the parsing for additional checks on the parsed parameters
+ */
+template <typename Parser>
+inline auto argparser_parse(Parser& parser, int argc, char* argv[], std::function<void(Parser&)> callback) -> bool {
+    try {
+        parser.parse(argc, argv, std::move(callback));
         return true;
     } catch (const cli::ParseError& e) {
         std::cerr << "Error: " << e.what() << "\n";

@@ -3,6 +3,17 @@
 
 #include "argparser.hxx"
 
+void check_params(cli::ArgParser& parser) {
+    auto name = parser.get<"name", std::string>();
+    if (name == "Riccardo") {
+        std::cerr << "This user cannot use this software.\n";
+        exit(EXIT_FAILURE);
+    } else if (name == "Matteo") {
+        std::cout << "Recognized admin, setting mode to turbo.\n";
+        parser.set<"mode", std::string>("turbo");
+    }
+}
+
 auto main(int argc, char* argv[]) -> int {
     cli::ArgParser parser("myapp", "A demo CLI application");
 
@@ -18,7 +29,7 @@ auto main(int argc, char* argv[]) -> int {
     parser.add<"name", std::string>().shorthand('N').description("Your name").require();
     parser.add<"weight", double>().shorthand('w').description("A double variable").default_val(.5).min(-10).max(10);
 
-    if (!argparser_parse(parser, argc, argv)) {
+    if (!argparser_parse(parser, argc, argv, check_params)) {
         return EXIT_FAILURE;
     }
 
