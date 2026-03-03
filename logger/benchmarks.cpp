@@ -2,8 +2,8 @@
  * @file bench_logger_simple.cpp
  * @brief Simple timing comparison: loop with vs without logging.
  *
- * Compile (C++23):
- *   g++ -std=c++23 -O2 -pthread bench_logger_simple.cpp -o bench_logger_simple
+ * Compile (C++20):
+ *   g++ -std=c++20 -O2 -pthread bench_logger_simple.cpp -o bench_logger_simple
  *
  * Output is suppressed via rdbuf swap so terminal I/O doesn't dominate.
  */
