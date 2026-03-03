@@ -139,9 +139,9 @@ class ParameterRegistry {
 
     ParameterRegistry() = default;
     ~ParameterRegistry() = default;
-    ParameterRegistry(const ParameterRegistry&) = delete;
-    auto operator=(const ParameterRegistry&) -> ParameterRegistry& = delete;
+    ParameterRegistry(const ParameterRegistry&) = default;
     ParameterRegistry(ParameterRegistry&&) = default;
+    auto operator=(const ParameterRegistry&) -> ParameterRegistry& = default;
     auto operator=(ParameterRegistry&&) -> ParameterRegistry& = default;
 
     // ── Write ─────────────────────────────────────────────────────────────
