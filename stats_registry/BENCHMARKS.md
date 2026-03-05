@@ -20,9 +20,7 @@ Operations that clearly register above the floor (timers, set algebra, combined 
 
 ## Per-thread storage design
 
-`TimerRegistry` uses a `thread_local std::array<std::unique_ptr<ThreadLocal>, MAX_REGISTRIES>` indexed by a per-registry integer ID (assigned once at construction). This replaces the previous `unordered_map<const TimerRegistry*, ThreadLocal>` that was probed on every `start()`/`stop()` call. The hot-path overhead is now a single indexed pointer load instead of a hash + probe. Up to `MAX_REGISTRIES` (default 8) independent `TimerRegistry` or `StatsRegistry` instances are supported across the program's lifetime.  
-
-_Note that in order to run the benchmarks yourself you will need to change MAX_REGISTRIES to 256 since multiple registries are created... In a real use case it's likely that only 1 is needed, maybe even the global one, so 8 should be enough._
+`TimerRegistry` uses a `thread_local std::array<std::unique_ptr<ThreadLocal>, MAX_REGISTRIES>` indexed by a per-registry integer ID (assigned once at construction). This replaces the previous `unordered_map<const TimerRegistry*, ThreadLocal>` that was probed on every `start()`/`stop()` call. The hot-path overhead is now a single indexed pointer load instead of a hash + probe. Up to `MAX_REGISTRIES` (default 256 - to pass tests that uses many different registries...) independent `TimerRegistry` or `StatsRegistry` instances are supported across the program's lifetime.  
 
 ## Suite Overview
 

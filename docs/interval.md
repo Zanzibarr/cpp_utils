@@ -2,6 +2,7 @@
 
 **File:** [`interval/interval.hxx`](../interval/interval.hxx)
 **Dependencies:** none
+**Benchmarks:** [interval/BENCHMARKS.md](../interval/BENCHMARKS.md)
 
 Closed interval `[min, max]` for arithmetic types. Provides containment queries, overlap detection, clamping, merging, intersection, translation, and (for floating-point) normalization — all as simple value types with no heap allocation.
 

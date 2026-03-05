@@ -2,6 +2,7 @@
 
 **File:** [`argparser/argparser.hxx`](../argparser/argparser.hxx)
 **Dependencies:** [parameters](parameters.md) → [ct_string](ct_string.md)
+**Benchmarks:** [argparser/BENCHMARKS.md](../argparser/BENCHMARKS.md)
 
 CLI argument parser with a fluent builder API, auto-generated help, optional TOML config file overlay, type validation, and range/choice constraints. Parsed values are stored in an underlying `ParameterRegistry` for O(1) access.
 

@@ -2,6 +2,7 @@
 
 **File:** [`scope_guard/scope_guard.hxx`](../scope_guard/scope_guard.hxx)
 **Dependencies:** none
+**Benchmarks:** [scope_guard/BENCHMARKS.md](../scope_guard/BENCHMARKS.md)
 
 RAII scope-guard that executes a callable on scope exit. Supports three strategies: always run, run only on exception, or run only on normal exit. Uses `std::uncaught_exceptions()` for correct behaviour with nested exceptions.
 
