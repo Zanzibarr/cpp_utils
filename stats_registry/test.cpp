@@ -841,6 +841,19 @@ TEST_CASE("elapsed is zero after reset while not running") {
     expect(reg.elapsed<"el_rst">()).to_approx_equal(0.0);
 }
 
+TEST_CASE("reset clears graveyard entry for timer run on an exited thread") {
+    // Exercises the remove_if lambda inside reset<Name>() that removes
+    // thread_graveyard_ entries once a worker thread has exited.
+    TimerRegistry reg;
+    std::thread([&] {
+        reg.start<"el_rst">();
+        reg.stop<"el_rst">();
+    }).join();
+    // The joined thread's stats moved into thread_graveyard_; reset cleans them.
+    reg.reset<"el_rst">();
+    expect(reg.stats<"el_rst">().count).to_equal(static_cast<std::size_t>(0));
+}
+
 TEST_CASE("get_stats_report merged stddev is non-negative") {
     TimerRegistry reg;
     for (int i = 0; i < 5; ++i) {

@@ -365,3 +365,21 @@ TEST_CASE("intervals with different max compare not equal") { expect(Interval<in
 TEST_CASE("operator!= returns true for different intervals") { expect(Interval<int>(0, 10) != Interval<int>(1, 10)).to_be_true(); }
 
 TEST_CASE("operator!= returns false for identical intervals") { expect(Interval<int>(0, 10) != Interval<int>(0, 10)).to_be_false(); }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// operator<<
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_SUITE("operator<<")
+
+TEST_CASE("operator<< formats a normal Interval as [min, max]") {
+    std::ostringstream oss;
+    oss << Interval<int>(2, 8);
+    expect(oss.str()).to_equal(std::string{"[2, 8]"});
+}
+
+TEST_CASE("operator<< formats an empty Interval as [empty]") {
+    std::ostringstream oss;
+    oss << Interval<int>::make_empty();
+    expect(oss.str()).to_equal(std::string{"[empty]"});
+}
