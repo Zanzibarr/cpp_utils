@@ -370,8 +370,10 @@ class TimerRegistry {
 
     // Maximum number of independent TimerRegistry instances in the program.
     // Each instance consumes one slot in the thread_local array used by
-    // thread_local_storage(). Raise if you need more than 8 registries.
-    static constexpr std::size_t MAX_REGISTRIES = 8;
+    // thread_local_storage(). Raise if you need more than 256 registries.
+    // 256 is a really high number for this class.. it's set to 256 only so
+    // that tests compile (since there a lot of registries are created)
+    static constexpr std::size_t MAX_REGISTRIES = 256;
 
     /**
      * Assigns a unique sequential slot index to a hash at static-init time.

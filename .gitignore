@@ -1,7 +1,12 @@
 .vscode
+.claude
 */demo
 */demo1
 */demo2
 */test
 */bench
 dashboard
+local
+*_cov
+*_cov*.profdata
+*_cov*.profraw
