@@ -1303,55 +1303,82 @@ TEST_SUITE("algebraic identities")
 
 TEST_CASE("De Morgan: complement of intersection equals union of complements") {
     BinarySet a(10), b(10);
-    a.add(1); a.add(2); a.add(3);
-    b.add(2); b.add(3); b.add(4);
+    a.add(1);
+    a.add(2);
+    a.add(3);
+    b.add(2);
+    b.add(3);
+    b.add(4);
     expect(!(a & b) == (!a | !b)).to_be_true();
 }
 
 TEST_CASE("De Morgan: complement of union equals intersection of complements") {
     BinarySet a(10), b(10);
-    a.add(1); a.add(2); a.add(3);
-    b.add(2); b.add(3); b.add(4);
+    a.add(1);
+    a.add(2);
+    a.add(3);
+    b.add(2);
+    b.add(3);
+    b.add(4);
     expect(!(a | b) == (!a & !b)).to_be_true();
 }
 
 TEST_CASE("intersection is associative") {
     BinarySet a(10), b(10), c(10);
-    a.add(1); a.add(2); a.add(3);
-    b.add(2); b.add(3); b.add(4);
-    c.add(3); c.add(4); c.add(5);
+    a.add(1);
+    a.add(2);
+    a.add(3);
+    b.add(2);
+    b.add(3);
+    b.add(4);
+    c.add(3);
+    c.add(4);
+    c.add(5);
     expect(((a & b) & c) == (a & (b & c))).to_be_true();
 }
 
 TEST_CASE("union is associative") {
     BinarySet a(10), b(10), c(10);
-    a.add(1); a.add(2);
-    b.add(3); b.add(4);
-    c.add(5); c.add(6);
+    a.add(1);
+    a.add(2);
+    b.add(3);
+    b.add(4);
+    c.add(5);
+    c.add(6);
     expect(((a | b) | c) == (a | (b | c))).to_be_true();
 }
 
 TEST_CASE("symmetric difference is associative") {
     BinarySet a(10), b(10), c(10);
-    a.add(1); a.add(2);
-    b.add(2); b.add(3);
-    c.add(3); c.add(4);
+    a.add(1);
+    a.add(2);
+    b.add(2);
+    b.add(3);
+    c.add(3);
+    c.add(4);
     expect(((a ^ b) ^ c) == (a ^ (b ^ c))).to_be_true();
 }
 
 TEST_CASE("intersection distributes over union") {
     BinarySet a(10), b(10), c(10);
-    a.add(1); a.add(2); a.add(3);
-    b.add(2); b.add(4);
-    c.add(3); c.add(4);
+    a.add(1);
+    a.add(2);
+    a.add(3);
+    b.add(2);
+    b.add(4);
+    c.add(3);
+    c.add(4);
     expect((a & (b | c)) == ((a & b) | (a & c))).to_be_true();
 }
 
 TEST_CASE("union distributes over intersection") {
     BinarySet a(10), b(10), c(10);
-    a.add(1); a.add(5);
-    b.add(2); b.add(5);
-    c.add(3); c.add(5);
+    a.add(1);
+    a.add(5);
+    b.add(2);
+    b.add(5);
+    c.add(3);
+    c.add(5);
     expect((a | (b & c)) == ((a | b) & (a | c))).to_be_true();
 }
 

@@ -35,9 +35,7 @@
 
 using clk = std::chrono::steady_clock;
 
-static auto elapsed_ns(clk::time_point t0) -> double {
-    return std::chrono::duration<double, std::nano>(clk::now() - t0).count();
-}
+static auto elapsed_ns(clk::time_point t0) -> double { return std::chrono::duration<double, std::nano>(clk::now() - t0).count(); }
 
 static constexpr long ITERS = 10'000'000;
 
@@ -49,8 +47,8 @@ static void print_header() {
 }
 
 static void print_row(const char* label, double total_ns) {
-    std::cout << std::left << std::setw(42) << label << std::right << std::fixed << std::setprecision(1) << std::setw(8) << (total_ns / 1e6)
-              << " ms" << std::setw(8) << std::setprecision(2) << (total_ns / static_cast<double>(ITERS)) << " ns\n";
+    std::cout << std::left << std::setw(42) << label << std::right << std::fixed << std::setprecision(1) << std::setw(8) << (total_ns / 1e6) << " ms"
+              << std::setw(8) << std::setprecision(2) << (total_ns / static_cast<double>(ITERS)) << " ns\n";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
