@@ -180,7 +180,7 @@ class ArgParser {
      * @tparam Name  Compile-time argument name (also the key in `ParameterRegistry`).
      * @tparam T     CLI value type: `int`, `double`, `bool`, `std::string`.
      *               After `parse()`, values are stored with these coercions:
-     *               `int` → `int64_t`, `double` → `double`,
+     *               `int` → `int`, `double` → `double`,
      *               `bool` → `bool`, `string`/`path` → `std::string`.
      * @throws ParseError if a duplicate `Name` is registered.
      */
@@ -197,13 +197,13 @@ class ArgParser {
             .setter =
                 [this](Value val) {
                     if constexpr (std::is_same_v<T, int>) {
-                        reg_.set<Name>(static_cast<int64_t>(std::get<int>(val)));
+                        reg_.set<Name, int>(std::get<int>(val));
                     } else if constexpr (std::is_same_v<T, double>) {
-                        reg_.set<Name>(std::get<double>(val));
+                        reg_.set<Name, double>(std::get<double>(val));
                     } else if constexpr (std::is_same_v<T, bool>) {
-                        reg_.set<Name>(std::get<bool>(val));
+                        reg_.set<Name, bool>(std::get<bool>(val));
                     } else if constexpr (std::is_same_v<T, std::string>) {
-                        reg_.set<Name>(std::get<std::string>(val));
+                        reg_.set<Name, std::string>(std::get<std::string>(val));
                     }
                 },
         });
@@ -304,11 +304,7 @@ class ArgParser {
      */
     template <CTString Name, typename T>
     [[nodiscard]] auto get() const -> T {
-        if constexpr (std::is_same_v<T, int>) {
-            return static_cast<int>(reg_.get<Name, int64_t>());
-        } else {
-            return reg_.get<Name, T>();  // double, bool, std::string, int64_t
-        }
+        return reg_.get<Name, T>();
     }
 
     /** Returns the underlying `ParameterRegistry` populated by `parse()`. */

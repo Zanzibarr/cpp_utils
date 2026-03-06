@@ -11,10 +11,10 @@
  * via `CtParamID<hash_name(Name)>::value`, so every `get<Name, T>()` call
  * is a plain array lookup with no hashing or branching at runtime.
  *
- * Supported value types: `int64_t`, `double`, `bool`, `std::string`.
+ * Supported value types: `int`, `double`, `bool`, `std::string`.
  * Automatic coercion is applied on `set()`:
  *   - `bool` literals → `bool` (checked before the generic integral path)
- *   - integral types  → `int64_t`
+ *   - integral types  → `int`
  *   - floating-point  → `double`
  *   - char* / string_view → `std::string`
  *
@@ -60,7 +60,7 @@ concept SupportedParamType = std::is_same_v<std::decay_t<T>, bool> || std::is_in
 // void means "auto-coerce" (the default); otherwise must be one of the four variant types.
 template <typename T>
 concept ValidStoredType =
-    std::is_void_v<T> || std::is_same_v<T, int64_t> || std::is_same_v<T, double> || std::is_same_v<T, bool> || std::is_same_v<T, std::string>;
+    std::is_void_v<T> || std::is_same_v<T, int> || std::is_same_v<T, double> || std::is_same_v<T, bool> || std::is_same_v<T, std::string>;
 
 }  // namespace param_detail
 
@@ -83,10 +83,10 @@ struct CtParamID {
  * Parameters are written once (during initialisation, single-threaded) and
  * then read-only. Lookup is O(1) array indexing — no hash map at runtime.
  *
- * Supported value types: int64_t, double, bool, std::string.
+ * Supported value types: int, double, bool, std::string.
  * Type coercions applied automatically on set():
  *   - bool literals        → bool     (checked before integral to avoid promotion)
- *   - integral types       → int64_t
+ *   - integral types       → int
  *   - floating-point types → double
  *   - char* / char[] / string_view → std::string
  *
@@ -99,12 +99,12 @@ struct CtParamID {
  * ─────
  *   ParameterRegistry params;
  *   params.set<"learning_rate">(0.001);
- *   params.set<"batch_size">(32);         // stored as int64_t
+ *   params.set<"batch_size">(32);         // stored as int
  *   params.set<"shuffle">(true);
  *   params.set<"optimizer">("adam");      // stored as std::string
  *
  *   double      lr  = params.get<"learning_rate", double>();
- *   int64_t     bs  = params.get<"batch_size",    int64_t>();
+ *   int         bs  = params.get<"batch_size",    int>();
  *   bool        sh  = params.get<"shuffle",        bool>();
  *   std::string opt = params.get<"optimizer",      std::string>();
  *
@@ -115,7 +115,7 @@ struct CtParamID {
 class ParameterRegistry {
    public:
     // Variant holding all supported parameter types.
-    using Value = std::variant<int64_t, double, bool, std::string>;
+    using Value = std::variant<int, double, bool, std::string>;
 
     // Maximum number of distinct compile-time parameter names across the whole
     // program. Raise if you hit the abort() in assign_param_id().
@@ -152,7 +152,7 @@ class ParameterRegistry {
      * Calling set() again for the same name overwrites the previous value.
      *
      * @tparam Name      Compile-time parameter name (CTString).
-     * @tparam StoredAs  Optional explicit target type (int64_t, double, bool, std::string).
+     * @tparam StoredAs  Optional explicit target type (int, double, bool, std::string).
      *                   When omitted (default void), the stored type is auto-coerced from T.
      *                   Use this to resolve ambiguous literals, e.g.:
      *                     params.set<"threshold", double>(0);  // 0 is int, but stored as double
@@ -171,7 +171,7 @@ class ParameterRegistry {
         } else if constexpr (std::is_same_v<D, bool>) {
             stored = value;
         } else if constexpr (std::is_integral_v<D>) {
-            stored = static_cast<int64_t>(value);
+            stored = static_cast<int>(value);
         } else if constexpr (std::is_floating_point_v<D>) {
             stored = static_cast<double>(value);
         } else {
@@ -200,7 +200,7 @@ class ParameterRegistry {
     /**
      * Returns a const reference to the stored value for Name as type T.
      * T must exactly match the type that was coerced during set<n>():
-     *   - integers  → int64_t
+     *   - integers  → int
      *   - floats    → double
      *   - bool      → bool
      *   - strings   → std::string
@@ -299,8 +299,8 @@ class ParameterRegistry {
         return std::visit(
             [](const auto& val) -> std::string {
                 using T = std::decay_t<decltype(val)>;
-                if constexpr (std::is_same_v<T, int64_t>) {
-                    return "int64";
+                if constexpr (std::is_same_v<T, int>) {
+                    return "int";
                 }
                 if constexpr (std::is_same_v<T, double>) {
                     return "double";

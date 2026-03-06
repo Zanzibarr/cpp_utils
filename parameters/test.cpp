@@ -26,11 +26,11 @@ TEST_CASE("set and get double") {
     expect(v).to_approx_equal(3.14);
 }
 
-TEST_CASE("set and get int64_t") {
+TEST_CASE("set and get int") {
     ParameterRegistry reg;
     reg.set<"t_int64">(42);
-    int64_t v = reg.get<"t_int64", int64_t>();
-    expect(v).to_equal(int64_t{42});
+    int v = reg.get<"t_int64", int>();
+    expect(v).to_equal(int{42});
 }
 
 TEST_CASE("set and get bool true") {
@@ -68,11 +68,11 @@ TEST_CASE("set and get string from std::string") {
 
 TEST_SUITE("type coercions")
 
-TEST_CASE("int literal is coerced to int64_t") {
+TEST_CASE("int literal is coerced to int") {
     ParameterRegistry reg;
     reg.set<"c_int">(100);
-    int64_t v = reg.get<"c_int", int64_t>();
-    expect(v).to_equal(int64_t{100});
+    int v = reg.get<"c_int", int>();
+    expect(v).to_equal(int{100});
 }
 
 TEST_CASE("float literal is coerced to double") {
@@ -82,14 +82,14 @@ TEST_CASE("float literal is coerced to double") {
     expect(v).to_approx_equal(1.5);
 }
 
-TEST_CASE("negative int is coerced to int64_t") {
+TEST_CASE("negative int is coerced to int") {
     ParameterRegistry reg;
     reg.set<"c_neg">(-7);
-    int64_t v = reg.get<"c_neg", int64_t>();
-    expect(v).to_equal(int64_t{-7});
+    int v = reg.get<"c_neg", int>();
+    expect(v).to_equal(int{-7});
 }
 
-TEST_CASE("bool is stored as bool, not int64_t") {
+TEST_CASE("bool is stored as bool, not int") {
     ParameterRegistry reg;
     reg.set<"c_boolt">(true);
     bool v = reg.get<"c_boolt", bool>();
@@ -103,11 +103,11 @@ TEST_CASE("StoredAs explicit override: int literal stored as double") {
     expect(v).to_approx_equal(0.0);
 }
 
-TEST_CASE("StoredAs explicit override: large int stored as int64_t") {
+TEST_CASE("StoredAs explicit override: large int stored as int") {
     ParameterRegistry reg;
-    reg.set<"c_sto2", int64_t>(999);
-    int64_t v = reg.get<"c_sto2", int64_t>();
-    expect(v).to_equal(int64_t{999});
+    reg.set<"c_sto2", int>(999);
+    int v = reg.get<"c_sto2", int>();
+    expect(v).to_equal(int{999});
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -146,14 +146,14 @@ TEST_CASE("get() throws out_of_range for unset parameter") {
 
 TEST_CASE("get() throws runtime_error on type mismatch (int stored, double requested)") {
     ParameterRegistry reg;
-    reg.set<"e_mismatch">(42);  // stored as int64_t
+    reg.set<"e_mismatch">(42);  // stored as int
     expect_throws(std::runtime_error, reg.get<"e_mismatch", double>());
 }
 
-TEST_CASE("get() throws runtime_error when bool stored and int64_t requested") {
+TEST_CASE("get() throws runtime_error when bool stored and int requested") {
     ParameterRegistry reg;
     reg.set<"e_boolint">(true);
-    expect_throws(std::runtime_error, reg.get<"e_boolint", int64_t>());
+    expect_throws(std::runtime_error, reg.get<"e_boolint", int>());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -166,8 +166,8 @@ TEST_CASE("set() again overwrites the previous value") {
     ParameterRegistry reg;
     reg.set<"ow_val">(1);
     reg.set<"ow_val">(99);
-    int64_t v = reg.get<"ow_val", int64_t>();
-    expect(v).to_equal(int64_t{99});
+    int v = reg.get<"ow_val", int>();
+    expect(v).to_equal(int{99});
 }
 
 TEST_CASE("set() again for string updates the value") {
@@ -199,12 +199,12 @@ TEST_CASE("all four supported types can be stored simultaneously") {
     reg.set<"m_opt">("adam");
 
     double lr = reg.get<"m_lr", double>();
-    int64_t bs = reg.get<"m_bs", int64_t>();
+    int bs = reg.get<"m_bs", int>();
     bool shuf = reg.get<"m_shuf", bool>();
     std::string opt = reg.get<"m_opt", std::string>();
 
     expect(lr).to_approx_equal(0.001);
-    expect(bs).to_equal(int64_t{32});
+    expect(bs).to_equal(int{32});
     expect(shuf).to_be_true();
     expect(opt).to_equal(std::string{"adam"});
 }
@@ -213,10 +213,10 @@ TEST_CASE("parameters are independent — setting one does not affect another") 
     ParameterRegistry reg;
     reg.set<"ind_a">(10);
     reg.set<"ind_b">(20);
-    int64_t a = reg.get<"ind_a", int64_t>();
-    int64_t b = reg.get<"ind_b", int64_t>();
-    expect(a).to_equal(int64_t{10});
-    expect(b).to_equal(int64_t{20});
+    int a = reg.get<"ind_a", int>();
+    int b = reg.get<"ind_b", int>();
+    expect(a).to_equal(int{10});
+    expect(b).to_equal(int{20});
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -244,10 +244,10 @@ TEST_CASE("get_report row has correct name") {
     expect(rows[0].name).to_equal(std::string{"r_name"});
 }
 
-TEST_CASE("get_report shows correct type for int64_t") {
+TEST_CASE("get_report shows correct type for int") {
     ParameterRegistry reg;
     reg.set<"r_itype">(1);
-    expect(reg.get_report()[0].type).to_equal(std::string{"int64"});
+    expect(reg.get_report()[0].type).to_equal(std::string{"int"});
 }
 
 TEST_CASE("get_report shows correct type for double") {
@@ -305,7 +305,7 @@ TEST_CASE("global_params returns the same singleton on repeated calls") {
 }
 
 TEST_CASE("global_params supports set and get") {
-    global_params().set<"gp_val">(int64_t{7});
-    int64_t v = global_params().get<"gp_val", int64_t>();
-    expect(v).to_equal(int64_t{7});
+    global_params().set<"gp_val">(int{7});
+    int v = global_params().get<"gp_val", int>();
+    expect(v).to_equal(int{7});
 }

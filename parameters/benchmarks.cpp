@@ -57,7 +57,7 @@ static void print_row(const char* label, double total_ns) {
 
 struct HardcodedParams {
     double learning_rate;
-    int64_t batch_size;
+    int batch_size;
     bool shuffle;
     std::string optimizer;
 };
@@ -109,10 +109,10 @@ int main() {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // BM2 — int64_t
+    // BM2 — int
     // ─────────────────────────────────────────────────────────────────────
 
-    std::cout << "\n── int64_t ──\n";
+    std::cout << "\n── int ──\n";
     {
         auto t0 = clk::now();
         for (long i = 0; i < ITERS; ++i) sum += static_cast<double>(s.batch_size);
@@ -120,8 +120,8 @@ int main() {
     }
     {
         auto t0 = clk::now();
-        for (long i = 0; i < ITERS; ++i) sum += static_cast<double>(reg.get<"batch_size", int64_t>());
-        print_row("ParameterRegistry::get<int64_t>", elapsed_ns(t0));
+        for (long i = 0; i < ITERS; ++i) sum += static_cast<double>(reg.get<"batch_size", int>());
+        print_row("ParameterRegistry::get<int>", elapsed_ns(t0));
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -174,7 +174,7 @@ int main() {
         auto t0 = clk::now();
         for (long i = 0; i < ITERS; ++i) {
             sum += reg.get<"learning_rate", double>();
-            sum += static_cast<double>(reg.get<"batch_size", int64_t>());
+            sum += static_cast<double>(reg.get<"batch_size", int>());
             sum += reg.get<"shuffle", bool>() ? 1.0 : 0.0;
         }
         print_row("ParameterRegistry (3 gets)", elapsed_ns(t0));

@@ -548,8 +548,8 @@ TEST_CASE("parameters() returns the underlying ParameterRegistry") {
     Args args{"prog"};
     parser.parse(args.argc(), args.argv());
     const auto& reg = parser.parameters();
-    int64_t val = reg.get<"ap_preg_n", int64_t>();
-    expect(val).to_equal(int64_t{5});
+    int val = reg.get<"ap_preg_n", int>();
+    expect(val).to_equal(int{5});
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
