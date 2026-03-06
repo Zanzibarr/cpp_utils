@@ -29,6 +29,7 @@
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <type_traits>
 
@@ -73,6 +74,15 @@ class Interval {
     auto contains(const Interval& other) const -> bool { return other.min_ >= min_ && other.max_ <= max_; }
     auto overlaps(const Interval& other) const -> bool { return !is_empty() && !other.is_empty() && other.max_ >= min_ && other.min_ <= max_; }
     [[nodiscard]] auto is_empty() const -> bool { return min_ > max_; }
+
+    explicit operator std::string() const {
+        std::stringstream ost;
+        if (is_empty()) {
+            return "[empty]";
+        }
+        ost << "[" << min() << ", " << max() << "]";
+        return ost.str();
+    }
 
     // ── Operations ──────────────────────────────────────────────────────────
 
@@ -206,8 +216,5 @@ class Interval {
 template <typename T>
     requires std::is_arithmetic_v<T>
 auto operator<<(std::ostream& out, const Interval<T>& inter) -> std::ostream& {
-    if (inter.is_empty()) {
-        return out << "[empty]";
-    }
-    return out << "[" << inter.min() << ", " << inter.max() << "]";
+    return out << static_cast<std::string>(inter);
 }

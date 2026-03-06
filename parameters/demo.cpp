@@ -215,15 +215,15 @@ void demo_errors() {
         std::cout << "Caught out_of_range: " << e.what() << "\n";
     }
 
-    // ── 5b. get with wrong type → std::bad_variant_access ─────────────────
-    subsection("5b. get<n, WrongType> → std::bad_variant_access");
+    // ── 5b. get with wrong type → std::runtime_error ─────────────────
+    subsection("5b. get<n, WrongType> → std::runtime_error");
 
     params.set<"count">(42);  // stored as int64_t
 
     try {
         [[maybe_unused]] auto v = params.get<"count", double>();  // wrong type
-    } catch (const std::bad_variant_access& e) {
-        std::cout << "Caught bad_variant_access: " << e.what() << "\n";
+    } catch (const std::runtime_error& e) {
+        std::cout << "Caught runtime_error: " << e.what() << "\n";
     }
 }
 

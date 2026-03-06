@@ -640,7 +640,7 @@ class TimerRegistry {
     }
 
     template <timer_detail::ValidDuration D = std::chrono::milliseconds>
-    auto get_stats_report_per_thread() const -> std::vector<ThreadStatsRow> {
+    auto get_thread_report() const -> std::vector<ThreadStatsRow> {
         std::vector<ThreadStatsRow> result;
         std::lock_guard lock(mutex_);
         for (const auto& row : thread_graveyard_) {
@@ -678,18 +678,12 @@ class TimerRegistry {
         return result;
     }
 
-    /**
-     * Prints the simple elapsed-time report — one line per timer name.
-     *
-     * Example output:
-     *   db_query:    42.31 ms
-     *   render:     120.07 ms
-     */
     template <timer_detail::ValidDuration D = std::chrono::milliseconds>
-    void print_report() const {
+    auto report_to_str() const -> std::string {
+        std::stringstream ost;
         const auto rows = get_report<D>();
         if (rows.empty()) {
-            return;
+            return ost.str();
         }
 
         // Find the longest name for alignment
@@ -699,9 +693,59 @@ class TimerRegistry {
         }
 
         for (const auto& [name, value] : rows) {
-            std::cout << std::left << std::setw(static_cast<int>(name_width)) << name << std::right << std::setw(10) << std::fixed
-                      << std::setprecision(2) << value << "  " << timer_detail::unit_name<D>() << "\n";
+            ost << std::left << std::setw(static_cast<int>(name_width)) << name << std::right << std::setw(10) << std::fixed << std::setprecision(2)
+                << value << "  " << timer_detail::unit_name<D>() << "\n";
         }
+
+        return ost.str();
+    }
+
+    /**
+     * Prints the simple elapsed-time report — one line per timer name.
+     *
+     * Example output:
+     *   db_query:    42.31 ms
+     *   render:     120.07 ms
+     */
+    template <timer_detail::ValidDuration D = std::chrono::milliseconds>
+    void print_report() const {
+        std::cout << report_to_str<D>();
+    }
+
+    auto stats_report_to_str() const -> std::string {
+        std::stringstream ost;
+        const auto rows = get_stats_report<std::chrono::nanoseconds>();
+        if (rows.empty()) {
+            return ost.str();
+        }
+
+        using namespace timer_detail;
+        auto cmin = [&](auto func) -> auto { return col_min<StatsRow>(rows, func); };
+        auto [dt, ut] = pick_unit(cmin([](const auto& row) { return row.total; }));
+        auto [dm, um] = pick_unit(cmin([](const auto& row) { return row.mean; }));
+        auto [di, ui] = pick_unit(cmin([](const auto& row) { return row.min; }));
+        auto [dx, ux] = pick_unit(cmin([](const auto& row) { return row.max; }));
+
+        constexpr int NAME_WIDTH = 24;
+        constexpr int THREAD_WIDTH = 9;
+        constexpr int VALUE_WIDTH = 14;
+        constexpr int THREAD_COLUMNS = 2;
+        constexpr int VALUE_COLUMNS = 5;
+
+        auto hdr = [](const char* key, const char* unit) -> std::string { return std::string(key) + "(" + unit + ")"; };
+
+        ost << std::left << std::setw(NAME_WIDTH) << "Timer" << std::right << std::setw(THREAD_WIDTH) << "Threads" << std::setw(THREAD_WIDTH)
+            << "Calls" << std::setw(VALUE_WIDTH) << hdr("Total", ut) << std::setw(VALUE_WIDTH) << hdr("Mean", um) << std::setw(VALUE_WIDTH)
+            << hdr("Min", ui) << std::setw(VALUE_WIDTH) << hdr("Max", ux) << std::setw(VALUE_WIDTH) << hdr("Stddev", um) << "\n"
+            << std::string(NAME_WIDTH + (THREAD_WIDTH * THREAD_COLUMNS) + (VALUE_WIDTH * VALUE_COLUMNS), '-') << "\n";
+        for (const auto& row : rows) {
+            ost << std::left << std::setw(NAME_WIDTH) << row.name << std::right << std::setw(THREAD_WIDTH) << row.thread_count
+                << std::setw(THREAD_WIDTH) << row.call_count << std::fixed << std::setprecision(2) << std::setw(VALUE_WIDTH) << row.total / dt
+                << std::setw(VALUE_WIDTH) << row.mean / dm << std::setw(VALUE_WIDTH) << row.min / di << std::setw(VALUE_WIDTH) << row.max / dx
+                << std::setw(VALUE_WIDTH) << row.stddev / dm << "\n";
+        }
+
+        return ost.str();
     }
 
     /**
@@ -709,25 +753,51 @@ class TimerRegistry {
      * Numbers are right-aligned, 2 decimal places. Each column independently
      * selects the most readable unit based on the smallest value in that column.
      */
-    void print_stats_report() const {
-        const auto rows = get_stats_report<std::chrono::nanoseconds>();
+    void print_stats_report() const { std::cout << stats_report_to_str(); }
+
+    auto thread_report_to_str() const -> std::string {
+        std::stringstream ost;
+
+        const auto rows = get_thread_report<std::chrono::nanoseconds>();
         if (rows.empty()) {
-            return;
+            return ost.str();
         }
-        print_stats_table_(rows);
+        using namespace timer_detail;
+        auto cmin = [&](auto func) -> auto { return col_min<ThreadStatsRow>(rows, func); };
+        auto [dt, ut] = pick_unit(cmin([](const auto& row) { return row.total; }));
+        auto [dm, um] = pick_unit(cmin([](const auto& row) { return row.mean; }));
+        auto [di, ui] = pick_unit(cmin([](const auto& row) { return row.min; }));
+        auto [dx, ux] = pick_unit(cmin([](const auto& row) { return row.max; }));
+        auto [ds, us] = pick_unit(cmin([](const auto& row) { return row.stddev > 0 ? row.stddev : std::numeric_limits<double>::max(); }));
+
+        constexpr int NAME_WIDTH = 24;
+        constexpr int IDW = 24;
+        constexpr int CALL_WIDTH = 8;
+        constexpr int VALUE_WIDTH = 14;
+        constexpr int VALUE_COLUMNS = 5;
+
+        auto hdr = [](const char* key, const char* unit) -> std::string { return std::string(key) + "(" + unit + ")"; };
+
+        ost << std::left << std::setw(NAME_WIDTH) << "Timer" << std::setw(IDW) << "Thread ID" << std::right << std::setw(CALL_WIDTH) << "Calls"
+            << std::setw(VALUE_WIDTH) << hdr("Total", ut) << std::setw(VALUE_WIDTH) << hdr("Mean", um) << std::setw(VALUE_WIDTH) << hdr("Min", ui)
+            << std::setw(VALUE_WIDTH) << hdr("Max", ux) << std::setw(VALUE_WIDTH) << hdr("Stddev", us) << "\n"
+            << std::string(NAME_WIDTH + IDW + CALL_WIDTH + (VALUE_WIDTH * VALUE_COLUMNS), '-') << "\n";
+        for (const auto& row : rows) {
+            std::ostringstream ostr;
+            ostr << row.tid;
+            ost << std::left << std::setw(NAME_WIDTH) << row.name << std::setw(IDW) << ostr.str() << std::right << std::setw(CALL_WIDTH)
+                << row.call_count << std::fixed << std::setprecision(2) << std::setw(VALUE_WIDTH) << row.total / dt << std::setw(VALUE_WIDTH)
+                << row.mean / dm << std::setw(VALUE_WIDTH) << row.min / di << std::setw(VALUE_WIDTH) << row.max / dx << std::setw(VALUE_WIDTH)
+                << row.stddev / ds << "\n";
+        }
+        return ost.str();
     }
 
     /**
      * Prints the per-thread statistics report.
      * Same formatting rules as print_stats_report().
      */
-    void print_stats_report_per_thread() const {
-        const auto rows = get_stats_report_per_thread<std::chrono::nanoseconds>();
-        if (rows.empty()) {
-            return;
-        }
-        print_per_thread_table_(rows);
-    }
+    void print_thread_report() const { std::cout << thread_report_to_str(); }
 
    private:
     struct ThreadLocal {
@@ -797,63 +867,6 @@ class TimerRegistry {
             ptr = std::make_unique<ThreadLocal>();
         }
         return *ptr;
-    }
-
-    // ── Print helpers ─────────────────────────────────────────────────────
-
-    static void print_stats_table_(const std::vector<StatsRow>& rows) {
-        using namespace timer_detail;
-        auto cmin = [&](auto func) -> auto { return col_min<StatsRow>(rows, func); };
-        auto [dt, ut] = pick_unit(cmin([](const auto& row) { return row.total; }));
-        auto [dm, um] = pick_unit(cmin([](const auto& row) { return row.mean; }));
-        auto [di, ui] = pick_unit(cmin([](const auto& row) { return row.min; }));
-        auto [dx, ux] = pick_unit(cmin([](const auto& row) { return row.max; }));
-
-        constexpr int NAME_WIDTH = 24;
-        constexpr int THREAD_WIDTH = 9;
-        constexpr int VALUE_WIDTH = 14;
-        constexpr int THREAD_COLUMNS = 2;
-        constexpr int VALUE_COLUMNS = 5;
-        auto hdr = [](const char* key, const char* unit) -> std::string { return std::string(key) + "(" + unit + ")"; };
-        std::cout << std::left << std::setw(NAME_WIDTH) << "Timer" << std::right << std::setw(THREAD_WIDTH) << "Threads" << std::setw(THREAD_WIDTH)
-                  << "Calls" << std::setw(VALUE_WIDTH) << hdr("Total", ut) << std::setw(VALUE_WIDTH) << hdr("Mean", um) << std::setw(VALUE_WIDTH)
-                  << hdr("Min", ui) << std::setw(VALUE_WIDTH) << hdr("Max", ux) << std::setw(VALUE_WIDTH) << hdr("Stddev", um) << "\n"
-                  << std::string(NAME_WIDTH + (THREAD_WIDTH * THREAD_COLUMNS) + (VALUE_WIDTH * VALUE_COLUMNS), '-') << "\n";
-        for (const auto& row : rows) {
-            std::cout << std::left << std::setw(NAME_WIDTH) << row.name << std::right << std::setw(THREAD_WIDTH) << row.thread_count
-                      << std::setw(THREAD_WIDTH) << row.call_count << std::fixed << std::setprecision(2) << std::setw(VALUE_WIDTH) << row.total / dt
-                      << std::setw(VALUE_WIDTH) << row.mean / dm << std::setw(VALUE_WIDTH) << row.min / di << std::setw(VALUE_WIDTH) << row.max / dx
-                      << std::setw(VALUE_WIDTH) << row.stddev / dm << "\n";
-        }
-    }
-
-    static void print_per_thread_table_(const std::vector<ThreadStatsRow>& rows) {
-        using namespace timer_detail;
-        auto cmin = [&](auto func) -> auto { return col_min<ThreadStatsRow>(rows, func); };
-        auto [dt, ut] = pick_unit(cmin([](const auto& row) { return row.total; }));
-        auto [dm, um] = pick_unit(cmin([](const auto& row) { return row.mean; }));
-        auto [di, ui] = pick_unit(cmin([](const auto& row) { return row.min; }));
-        auto [dx, ux] = pick_unit(cmin([](const auto& row) { return row.max; }));
-        auto [ds, us] = pick_unit(cmin([](const auto& row) { return row.stddev > 0 ? row.stddev : std::numeric_limits<double>::max(); }));
-
-        constexpr int NAME_WIDTH = 24;
-        constexpr int IDW = 24;
-        constexpr int CALL_WIDTH = 8;
-        constexpr int VALUE_WIDTH = 14;
-        constexpr int VALUE_COLUMNS = 5;
-        auto hdr = [](const char* key, const char* unit) -> std::string { return std::string(key) + "(" + unit + ")"; };
-        std::cout << std::left << std::setw(NAME_WIDTH) << "Timer" << std::setw(IDW) << "Thread ID" << std::right << std::setw(CALL_WIDTH) << "Calls"
-                  << std::setw(VALUE_WIDTH) << hdr("Total", ut) << std::setw(VALUE_WIDTH) << hdr("Mean", um) << std::setw(VALUE_WIDTH)
-                  << hdr("Min", ui) << std::setw(VALUE_WIDTH) << hdr("Max", ux) << std::setw(VALUE_WIDTH) << hdr("Stddev", us) << "\n"
-                  << std::string(NAME_WIDTH + IDW + CALL_WIDTH + (VALUE_WIDTH * VALUE_COLUMNS), '-') << "\n";
-        for (const auto& row : rows) {
-            std::ostringstream ostr;
-            ostr << row.tid;
-            std::cout << std::left << std::setw(NAME_WIDTH) << row.name << std::setw(IDW) << ostr.str() << std::right << std::setw(CALL_WIDTH)
-                      << row.call_count << std::fixed << std::setprecision(2) << std::setw(VALUE_WIDTH) << row.total / dt << std::setw(VALUE_WIDTH)
-                      << row.mean / dm << std::setw(VALUE_WIDTH) << row.min / di << std::setw(VALUE_WIDTH) << row.max / dx << std::setw(VALUE_WIDTH)
-                      << row.stddev / ds << "\n";
-        }
     }
 
     // ── State — all guarded by mutex_ ─────────────────────────────────────

@@ -38,6 +38,7 @@
 #include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -239,10 +240,11 @@ class StatsRegistry : public TimerRegistry {
         return result;
     }
 
-    void print_counter_report() const {
+    auto counter_report_to_str() const -> std::string {
+        std::stringstream ost;
         auto rows = get_counter_report();
         if (rows.empty()) {
-            return;
+            return ost.str();
         }
         constexpr std::size_t DEFAULT_NAME_WIDTH = 8;
         std::size_t name_width = DEFAULT_NAME_WIDTH;
@@ -250,12 +252,15 @@ class StatsRegistry : public TimerRegistry {
             name_width = std::max(name_width, row.name.size() + 2);
         }
         constexpr int VAL_WIDTH = 14;
-        std::cout << std::left << std::setw(static_cast<int>(name_width)) << "Counter" << std::right << std::setw(VAL_WIDTH) << "Value" << "\n"
-                  << std::string(name_width + VAL_WIDTH, '-') << "\n";
+        ost << std::left << std::setw(static_cast<int>(name_width)) << "Counter" << std::right << std::setw(VAL_WIDTH) << "Value" << "\n"
+            << std::string(name_width + VAL_WIDTH, '-') << "\n";
         for (const auto& row : rows) {
-            std::cout << std::left << std::setw(static_cast<int>(name_width)) << row.name << std::right << std::setw(VAL_WIDTH) << row.value << "\n";
+            ost << std::left << std::setw(static_cast<int>(name_width)) << row.name << std::right << std::setw(VAL_WIDTH) << row.value << "\n";
         }
+        return ost.str();
     }
+
+    void print_counter_report() const { std::cout << counter_report_to_str(); }
 
     // ═════════════════════════════════════════════════════════════════════
     // GAUGES
@@ -314,10 +319,11 @@ class StatsRegistry : public TimerRegistry {
         return result;
     }
 
-    void print_gauge_report() const {
+    auto gauge_report_to_str() const -> std::string {
+        std::stringstream ost;
         const auto rows = get_gauge_report();
         if (rows.empty()) {
-            return;
+            return ost.str();
         }
         constexpr std::size_t DEFAULT_GAUGE_NAME_WIDTH = 8;
         std::size_t name_width = DEFAULT_GAUGE_NAME_WIDTH;
@@ -327,16 +333,19 @@ class StatsRegistry : public TimerRegistry {
         constexpr int TAG_WIDTH = 9;
         constexpr int VAL_WIDTH = 14;
         constexpr int NUM_VALUE_COLUMNS = 5;
-        std::cout << std::left << std::setw(static_cast<int>(name_width)) << "Gauge" << std::right << std::setw(TAG_WIDTH) << "Samples"
-                  << std::setw(VAL_WIDTH) << "Total" << std::setw(VAL_WIDTH) << "Mean" << std::setw(VAL_WIDTH) << "Min" << std::setw(VAL_WIDTH)
-                  << "Max" << std::setw(VAL_WIDTH) << "Stddev" << "\n"
-                  << std::string(name_width + TAG_WIDTH + (VAL_WIDTH * NUM_VALUE_COLUMNS), '-') << "\n";
+        ost << std::left << std::setw(static_cast<int>(name_width)) << "Gauge" << std::right << std::setw(TAG_WIDTH) << "Samples"
+            << std::setw(VAL_WIDTH) << "Total" << std::setw(VAL_WIDTH) << "Mean" << std::setw(VAL_WIDTH) << "Min" << std::setw(VAL_WIDTH) << "Max"
+            << std::setw(VAL_WIDTH) << "Stddev" << "\n"
+            << std::string(name_width + TAG_WIDTH + (VAL_WIDTH * NUM_VALUE_COLUMNS), '-') << "\n";
         for (const auto& row : rows) {
-            std::cout << std::left << std::setw(static_cast<int>(name_width)) << row.name << std::right << std::setw(TAG_WIDTH) << row.count
-                      << std::fixed << std::setprecision(4) << std::setw(VAL_WIDTH) << row.total << std::setw(VAL_WIDTH) << row.mean
-                      << std::setw(VAL_WIDTH) << row.min << std::setw(VAL_WIDTH) << row.max << std::setw(VAL_WIDTH) << row.stddev << "\n";
+            ost << std::left << std::setw(static_cast<int>(name_width)) << row.name << std::right << std::setw(TAG_WIDTH) << row.count << std::fixed
+                << std::setprecision(4) << std::setw(VAL_WIDTH) << row.total << std::setw(VAL_WIDTH) << row.mean << std::setw(VAL_WIDTH) << row.min
+                << std::setw(VAL_WIDTH) << row.max << std::setw(VAL_WIDTH) << row.stddev << "\n";
         }
+        return ost.str();
     }
+
+    void print_gauge_report() const { std::cout << gauge_report_to_str(); }
 
     // ═════════════════════════════════════════════════════════════════════
     // HISTOGRAMS
@@ -438,18 +447,15 @@ class StatsRegistry : public TimerRegistry {
         return result;
     }
 
-    /**
-     * Prints histograms with ASCII bar charts.
-     * @param bar_width Maximum number of '#' characters for 100%.
-     */
-    void print_histogram_report(int bar_width = DEFAULT_HISTOGRAM_BAR_WIDTH) const {
+    auto histogram_report_to_str(int bar_width = DEFAULT_HISTOGRAM_BAR_WIDTH) const -> std::string {
+        std::stringstream ost;
         const auto rows = get_histogram_report();
         if (rows.empty()) {
-            return;
+            return ost.str();
         }
         for (const auto& row : rows) {
-            std::cout << "── Histogram: " << row.name << "  [total=" << row.total << "  underflow=" << row.underflow << "  overflow=" << row.overflow
-                      << "] ──\n";
+            ost << "── Histogram: " << row.name << "  [total=" << row.total << "  underflow=" << row.underflow << "  overflow=" << row.overflow
+                << "] ──\n";
             std::size_t in_range = row.total - row.underflow - row.overflow;
             int label_width = 0;
             for (const auto& bucket : row.buckets) {
@@ -461,14 +467,21 @@ class StatsRegistry : public TimerRegistry {
                 std::ostringstream label;
                 label << std::fixed << std::setprecision(2) << "[" << bucket.low << ", " << bucket.high << ")";
                 int filled = in_range > 0 ? static_cast<int>(std::round(bucket.pct / 100.0 * bar_width)) : 0;
-                std::cout << std::left << std::setw(label_width) << label.str() << " | " << std::string(static_cast<std::size_t>(filled), '#')
-                          << std::string(static_cast<std::size_t>(std::max(0, bar_width - filled)), ' ') << " " << std::right
-                          << std::setw(HISTOGRAM_PERCENTAGE_WIDTH) << std::fixed << std::setprecision(1) << bucket.pct << "%"
-                          << "  (" << bucket.count << ")\n";
+                ost << std::left << std::setw(label_width) << label.str() << " | " << std::string(static_cast<std::size_t>(filled), '#')
+                    << std::string(static_cast<std::size_t>(std::max(0, bar_width - filled)), ' ') << " " << std::right
+                    << std::setw(HISTOGRAM_PERCENTAGE_WIDTH) << std::fixed << std::setprecision(1) << bucket.pct << "%"
+                    << "  (" << bucket.count << ")\n";
             }
-            std::cout << "\n";
+            ost << "\n";
         }
+        return ost.str();
     }
+
+    /**
+     * Prints histograms with ASCII bar charts.
+     * @param bar_width Maximum number of '#' characters for 100%.
+     */
+    void print_histogram_report(int bar_width = DEFAULT_HISTOGRAM_BAR_WIDTH) const { std::cout << histogram_report_to_str(bar_width); }
 
     // ═════════════════════════════════════════════════════════════════════
     // CONVENIENCE — print everything at once

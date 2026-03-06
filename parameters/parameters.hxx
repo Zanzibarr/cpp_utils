@@ -34,6 +34,7 @@
 #include <atomic>
 #include <iomanip>
 #include <iostream>
+#include <ostream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -205,7 +206,7 @@ class ParameterRegistry {
      *   - strings   → std::string
      *
      * @throws std::out_of_range       if Name has not been set.
-     * @throws std::bad_variant_access if T does not match the stored type.
+     * @throws std::runtime_error if T does not match the stored type.
      */
     template <CTString Name, typename T>
     [[nodiscard]] auto get() const -> const T& {
@@ -259,10 +260,13 @@ class ParameterRegistry {
      *   shuffle            bool      true
      *   optimizer          string    "adam"
      */
-    void print_report() const {
+    void print_report() const { std::cout << *this; }
+
+    explicit operator std::string() const {
+        std::ostringstream oss;
         const auto rows = get_report();
         if (rows.empty()) {
-            return;
+            return oss.str();
         }
         constexpr std::size_t MIN_NAME_WIDTH = 12;
         constexpr std::size_t MIN_TYPE_WIDTH = 8;
@@ -272,14 +276,17 @@ class ParameterRegistry {
             name_width = std::max(name_width, row.name.size() + 2);
             type_width = std::max(type_width, row.type.size() + 2);
         }
-        std::cout << std::left << std::setw(static_cast<int>(name_width)) << "Parameter" << std::setw(static_cast<int>(type_width)) << "Type"
-                  << "Value\n"
-                  << std::string(name_width + type_width + 20, '-') << "\n";
+        oss << std::left << std::setw(static_cast<int>(name_width)) << "Parameter" << std::setw(static_cast<int>(type_width)) << "Type"
+            << "Value\n"
+            << std::string(name_width + type_width + 20, '-') << "\n";
         for (const auto& row : rows) {
-            std::cout << std::left << std::setw(static_cast<int>(name_width)) << row.name << std::setw(static_cast<int>(type_width)) << row.type
-                      << row.value_str << "\n";
+            oss << std::left << std::setw(static_cast<int>(name_width)) << row.name << std::setw(static_cast<int>(type_width)) << row.type
+                << row.value_str << "\n";
         }
+        return oss.str();
     }
+
+    friend auto operator<<(std::ostream& ostr, const ParameterRegistry& reg) -> std::ostream& { return ostr << static_cast<std::string>(reg); }
 
    private:
     struct Slot {

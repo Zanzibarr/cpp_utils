@@ -729,9 +729,9 @@ BENCH_CASE_N("get_stats_report() — merge all timer threads (Welford combine)",
     }
 }
 
-BENCH_CASE_N("get_stats_report_per_thread() — iterate graveyard + live threads", 5'000) {
+BENCH_CASE_N("get_thread_report() — iterate graveyard + live threads", 5'000) {
     for (auto _ : state) {
-        auto r = reg().get_stats_report_per_thread();
+        auto r = reg().get_thread_report();
         DoNotOptimize(r.size());
     }
 }

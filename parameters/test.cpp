@@ -198,9 +198,9 @@ TEST_CASE("all four supported types can be stored simultaneously") {
     reg.set<"m_shuf">(true);
     reg.set<"m_opt">("adam");
 
-    double lr    = reg.get<"m_lr", double>();
-    int64_t bs   = reg.get<"m_bs", int64_t>();
-    bool shuf    = reg.get<"m_shuf", bool>();
+    double lr = reg.get<"m_lr", double>();
+    int64_t bs = reg.get<"m_bs", int64_t>();
+    bool shuf = reg.get<"m_shuf", bool>();
     std::string opt = reg.get<"m_opt", std::string>();
 
     expect(lr).to_approx_equal(0.001);
@@ -284,6 +284,12 @@ TEST_CASE("print_report does not throw") {
     ParameterRegistry reg;
     reg.set<"r_print">(42);
     expect_no_throw(reg.print_report());
+}
+
+TEST_CASE("cast to string does not throw") {
+    ParameterRegistry reg;
+    reg.set<"r_print">(42);
+    expect_no_throw(static_cast<std::string>(reg));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

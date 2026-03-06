@@ -378,7 +378,7 @@ void demo_multithreaded() {
     reg.print_stats_report();
 
     subsection("Timer report — per-thread breakdown");
-    reg.print_stats_report_per_thread();
+    reg.print_thread_report();
 
     subsection("Counter report");
     reg.print_counter_report();

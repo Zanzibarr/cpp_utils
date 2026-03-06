@@ -367,10 +367,20 @@ TEST_CASE("operator!= returns true for different intervals") { expect(Interval<i
 TEST_CASE("operator!= returns false for identical intervals") { expect(Interval<int>(0, 10) != Interval<int>(0, 10)).to_be_false(); }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// operator<<
+// operator<< and string conversion
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_SUITE("operator<<")
+TEST_SUITE("operator<< and string conversion")
+
+TEST_CASE("cast to string formats a normal Interval as [min, max]") {
+    std::string str = static_cast<std::string>(Interval<int>(2, 8));
+    expect(str).to_equal(std::string{"[2, 8]"});
+}
+
+TEST_CASE("cast to string formats an empty Interval as [empty]") {
+    std::string str = static_cast<std::string>(Interval<int>::make_empty());
+    expect(str).to_equal(std::string{"[empty]"});
+}
 
 TEST_CASE("operator<< formats a normal Interval as [min, max]") {
     std::ostringstream oss;

@@ -625,7 +625,7 @@ TEST_CASE("get_stats_report merged across threads has correct total call count")
     expect(row.thread_count).to_equal(static_cast<std::size_t>(N));
 }
 
-TEST_CASE("get_stats_report_per_thread has one row per thread") {
+TEST_CASE("get_thread_report has one row per thread") {
     TimerRegistry reg;
     constexpr int N = 3;
     std::vector<std::thread> threads;
@@ -636,7 +636,7 @@ TEST_CASE("get_stats_report_per_thread has one row per thread") {
         });
     }
     for (auto& t : threads) t.join();
-    auto rows = reg.get_stats_report_per_thread();
+    auto rows = reg.get_thread_report();
     std::size_t count = 0;
     for (const auto& r : rows)
         if (r.name == "pt") ++count;
@@ -817,7 +817,7 @@ TEST_CASE("timer from exited thread appears in get_stats_report") {
     expect(row.call_count).to_equal(static_cast<std::size_t>(1));
 }
 
-TEST_CASE("timer from exited thread appears in get_stats_report_per_thread") {
+TEST_CASE("timer from exited thread appears in get_thread_report") {
     TimerRegistry reg;
     {
         std::thread t([&] {
@@ -826,7 +826,7 @@ TEST_CASE("timer from exited thread appears in get_stats_report_per_thread") {
         });
         t.join();
     }
-    auto rows = reg.get_stats_report_per_thread();
+    auto rows = reg.get_thread_report();
     bool found = false;
     for (const auto& r : rows)
         if (r.name == "exited_pt") found = true;
@@ -2024,12 +2024,12 @@ TEST_CASE("print_report (simple) does not crash with used timer") {
     expect_no_throw(reg.print_report());
 }
 
-TEST_CASE("print_stats_report_per_thread does not crash") {
+TEST_CASE("print_thread_report does not crash") {
     TimerRegistry reg;
     reg.start<"print_pt">();
     reg.stop<"print_pt">();
     SuppressStdout suppress;
-    expect_no_throw(reg.print_stats_report_per_thread());
+    expect_no_throw(reg.print_thread_report());
 }
 
 TEST_CASE("all three primitive types can coexist in the same registry with different names") {
