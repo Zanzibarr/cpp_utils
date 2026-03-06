@@ -337,19 +337,18 @@ class Logger {
         std::string thread_tag = (rec.lvl == level::BASIC || !show_thread_) ? "" : "[T:" + rec.thread_id + "] ";
         std::string level_tag = rec.lvl == level::BASIC ? "" : std::string("[") + label + "] ";
 
-        // File output (plain text, no ANSI) — written in addition to console,
-        // not instead of it.
+        // File output (plain text, no ANSI)
         if (file_.is_open()) {
             file_ << time_tag << thread_tag << level_tag << rec.message << '\n';
             file_.flush();
-        }
-
-        // Console output — always emitted (file is supplementary, not exclusive).
-        if (use_colors_) {
-            ostr << ansi::codes::cyan << time_tag << ansi::codes::reset << ansi::codes::magenta << thread_tag << ansi::codes::reset << color
-                 << level_tag << ansi::codes::reset << rec.message << '\n';
         } else {
-            ostr << time_tag << thread_tag << level_tag << rec.message << '\n';
+            // Console output
+            if (use_colors_) {
+                ostr << ansi::codes::cyan << time_tag << ansi::codes::reset << ansi::codes::magenta << thread_tag << ansi::codes::reset << color
+                     << level_tag << ansi::codes::reset << rec.message << '\n';
+            } else {
+                ostr << time_tag << thread_tag << level_tag << rec.message << '\n';
+            }
         }
     }
 
