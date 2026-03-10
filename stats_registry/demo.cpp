@@ -10,7 +10,6 @@
  */
 
 #include <chrono>
-#include <cmath>
 #include <iomanip>
 #include <iostream>
 #include <random>
@@ -391,11 +390,86 @@ void demo_multithreaded() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 6 — Combined print_all_reports()
+// SECTION 6 — Series (ordered time-stamped sequences)
+// ─────────────────────────────────────────────────────────────────────────────
+
+void demo_series() {
+    section("6 · Series — tracking value evolution over time");
+
+    auto& reg = STATS;
+
+    // ── Simulate a MIP solver recording incumbent + lower bounds ─────────────
+    subsection("MIP-solver incumbent & lower-bound progression (single thread)");
+
+    const std::vector<double> incumbents = {1823.4, 1501.2, 1340.0, 1210.5, 1098.3, 1072.1, 1061.8, 1052.0};
+    const std::vector<double> lower_bounds = {0.0, 320.5, 650.2, 820.3, 920.7, 980.2, 1010.4, 1030.8};
+
+    // Initial incumbent and lower bounds (for timing purposes... time is measured since the first series_push (for that series name))
+    reg.series_push<"mip.incumbent">(1e20);
+    reg.series_push<"mip.lower_bound">(0);
+
+    // Time before first incumbents and lower bounds found
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    for (unsigned int i = 0; i < incumbents.size(); i++) {
+        reg.series_push<"mip.incumbent">(incumbents[i]);
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        reg.series_push<"mip.lower_bound">(lower_bounds[i]);
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    }
+
+    reg.print_series_report();
+
+    // ── series_get<Name>() for programmatic access ────────────────────────────
+    subsection("series_get<Name>() — retrieve all points for plotting");
+
+    const auto pts = reg.series_get<"mip.incumbent">();
+    std::cout << "  mip.incumbent (" << pts.size() << " points):\n";
+    int64_t t0_ns = pts.front().timestamp_ns;
+    for (const auto& pt : pts) {
+        double rel_ms = static_cast<double>(pt.timestamp_ns - t0_ns) / 1e6;
+        std::cout << "    +" << std::fixed << std::setprecision(1) << std::setw(7) << rel_ms << " ms → " << pt.value << "\n";
+    }
+
+    // ── series_reset ──────────────────────────────────────────────────────────
+    subsection("series_reset<Name>() — clear and start fresh");
+
+    reg.series_reset<"mip.incumbent">();
+    reg.series_push<"mip.incumbent">(999.9);
+    reg.series_push<"mip.incumbent">(888.8);
+    const auto after_reset = reg.series_get<"mip.incumbent">();
+    std::cout << "  mip.incumbent (" << after_reset.size() << " points):\n";
+    t0_ns = after_reset.front().timestamp_ns;
+    for (const auto& pt : after_reset) {
+        double rel_ms = static_cast<double>(pt.timestamp_ns - t0_ns) / 1e6;
+        std::cout << "    +" << std::fixed << std::setprecision(1) << std::setw(7) << rel_ms << " ms → " << pt.value << "\n";
+    }
+
+    // ── Multi-threaded: each thread pushes to its own series ─────────────────
+    subsection("Multi-threaded: two threads push to separate series");
+
+    StatsRegistry mreg;
+    std::thread t1([&] {
+        for (int i = 0; i < 5; ++i) {
+            mreg.series_push<"thread.a">(static_cast<double>(i) * 1.1);
+        }
+    });
+    std::thread t2([&] {
+        for (int i = 0; i < 5; ++i) {
+            mreg.series_push<"thread.b">(static_cast<double>(i) * 2.2);
+        }
+    });
+    t1.join();
+    t2.join();
+    mreg.print_series_report();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 7 — Combined print_all_reports()
 // ─────────────────────────────────────────────────────────────────────────────
 
 void demo_all_reports() {
-    section("6 · print_all_reports() — everything in one call");
+    section("7 · print_all_reports() — everything in one call");
     STATS.print_all_reports();
 }
 
@@ -413,6 +487,7 @@ int main() {
     demo_gauges();
     demo_histograms();
     demo_multithreaded();
+    demo_series();
     demo_all_reports();
 
     std::cout << "\n"

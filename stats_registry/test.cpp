@@ -47,6 +47,12 @@ inline auto find_timer(const std::vector<TimerRegistry::StatsRow>& rows, const s
     throw std::runtime_error("Timer '" + name + "' not found");
 }
 
+inline auto find_series(const std::vector<StatsRegistry::SeriesRow>& rows, const std::string& name) -> StatsRegistry::SeriesRow {
+    for (const auto& row : rows)
+        if (row.name == name) return row;
+    throw std::runtime_error("Series '" + name + "' not found");
+}
+
 // Suppresses std::cout output for the duration of the scope.
 struct SuppressStdout {
     SuppressStdout() : old_buf_(std::cout.rdbuf(null_stream_.rdbuf())) {}
@@ -2091,4 +2097,180 @@ TEST_CASE("get_stats_report returns correct thread_count for mixed live and exit
     auto row = find_timer(reg.get_stats_report(), "mixed_tc");
     expect(row.call_count).to_equal(static_cast<std::size_t>(3));
     expect(row.thread_count).to_equal(static_cast<std::size_t>(3));
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// SERIES
+// ═════════════════════════════════════════════════════════════════════════════
+
+TEST_SUITE("StatsRegistry – Series")
+
+TEST_CASE("series_push single-thread preserves insertion order") {
+    StatsRegistry reg;
+    reg.series_push<"sr_order">(1.0);
+    reg.series_push<"sr_order">(2.0);
+    reg.series_push<"sr_order">(3.0);
+    const auto pts = reg.series_get<"sr_order">();
+    expect(pts.size()).to_equal(static_cast<std::size_t>(3));
+    expect(pts[0].value).to_equal(1.0);
+    expect(pts[1].value).to_equal(2.0);
+    expect(pts[2].value).to_equal(3.0);
+}
+
+TEST_CASE("series_push timestamps are monotonically non-decreasing") {
+    StatsRegistry reg;
+    for (int i = 0; i < 10; ++i) {
+        reg.series_push<"sr_mono">(static_cast<double>(i));
+    }
+    const auto pts = reg.series_get<"sr_mono">();
+    for (std::size_t i = 1; i < pts.size(); ++i) {
+        expect(pts[i].timestamp_ns >= pts[i - 1].timestamp_ns).to_be_true();
+    }
+}
+
+TEST_CASE("series_reset clears all stored points") {
+    StatsRegistry reg;
+    reg.series_push<"sr_reset">(1.0);
+    reg.series_push<"sr_reset">(2.0);
+    reg.series_reset<"sr_reset">();
+    const auto pts = reg.series_get<"sr_reset">();
+    expect(pts.empty()).to_be_true();
+}
+
+TEST_CASE("series_push after series_reset starts a fresh sequence") {
+    StatsRegistry reg;
+    reg.series_push<"sr_reset2">(99.0);
+    reg.series_reset<"sr_reset2">();
+    reg.series_push<"sr_reset2">(1.0);
+    reg.series_push<"sr_reset2">(2.0);
+    const auto pts = reg.series_get<"sr_reset2">();
+    expect(pts.size()).to_equal(static_cast<std::size_t>(2));
+    expect(pts[0].value).to_equal(1.0);
+    expect(pts[1].value).to_equal(2.0);
+}
+
+TEST_CASE("get_series_report is empty when no series have been pushed") {
+    StatsRegistry reg;
+    expect(reg.get_series_report().empty()).to_be_true();
+}
+
+TEST_CASE("get_series_report omits series with no pushes after registration") {
+    // series_reset without any prior push should not register the series
+    StatsRegistry reg;
+    reg.series_reset<"sr_empty_after_reset">();
+    expect(reg.get_series_report().empty()).to_be_true();
+}
+
+TEST_CASE("get_series_report returns all registered series") {
+    StatsRegistry reg;
+    reg.series_push<"sr_multi_a">(1.0);
+    reg.series_push<"sr_multi_b">(2.0);
+    const auto rows = reg.get_series_report();
+    expect(rows.size()).to_equal(static_cast<std::size_t>(2));
+    const auto row_a = find_series(rows, "sr_multi_a");
+    const auto row_b = find_series(rows, "sr_multi_b");
+    expect(row_a.points.size()).to_equal(static_cast<std::size_t>(1));
+    expect(row_b.points.size()).to_equal(static_cast<std::size_t>(1));
+}
+
+TEST_CASE("series points are sorted by timestamp in get_series_report") {
+    StatsRegistry reg;
+    reg.series_push<"sr_sorted">(10.0);
+    reg.series_push<"sr_sorted">(20.0);
+    reg.series_push<"sr_sorted">(30.0);
+    const auto rows = reg.get_series_report();
+    const auto row = find_series(rows, "sr_sorted");
+    for (std::size_t i = 1; i < row.points.size(); ++i) {
+        expect(row.points[i].timestamp_ns >= row.points[i - 1].timestamp_ns).to_be_true();
+    }
+}
+
+TEST_CASE("concurrent series_push from multiple threads has correct total count") {
+    StatsRegistry reg;
+    constexpr int N_THREADS = 4;
+    constexpr int PUSHES_PER_THREAD = 250;
+    std::vector<std::thread> threads;
+    for (int i = 0; i < N_THREADS; ++i) {
+        threads.emplace_back([&] {
+            for (int j = 0; j < PUSHES_PER_THREAD; ++j) {
+                reg.series_push<"sr_concurrent">(static_cast<double>(j));
+            }
+        });
+    }
+    for (auto& thr : threads) thr.join();
+    const auto pts = reg.series_get<"sr_concurrent">();
+    expect(pts.size()).to_equal(static_cast<std::size_t>(N_THREADS * PUSHES_PER_THREAD));
+}
+
+TEST_CASE("series data from exited thread is preserved in report") {
+    StatsRegistry reg;
+    {
+        std::thread worker([&] {
+            reg.series_push<"sr_exited">(42.0);
+        });
+        worker.join();
+    }
+    const auto pts = reg.series_get<"sr_exited">();
+    expect(pts.size()).to_equal(static_cast<std::size_t>(1));
+    expect(pts[0].value).to_equal(42.0);
+}
+
+TEST_CASE("series_reset clears data from exited threads") {
+    StatsRegistry reg;
+    {
+        std::thread worker([&] {
+            reg.series_push<"sr_exited_reset">(10.0);
+        });
+        worker.join();
+    }
+    reg.series_reset<"sr_exited_reset">();
+    reg.series_push<"sr_exited_reset">(99.0);
+    const auto pts = reg.series_get<"sr_exited_reset">();
+    expect(pts.size()).to_equal(static_cast<std::size_t>(1));
+    expect(pts[0].value).to_equal(99.0);
+}
+
+TEST_CASE("series name registered as different primitive type throws") {
+    StatsRegistry reg;
+    reg.series_push<"sr_kind_conflict">(1.0);
+    expect_throws(std::logic_error, reg.counter_inc<"sr_kind_conflict">());
+}
+
+TEST_CASE("series registry isolation — two instances are independent") {
+    StatsRegistry reg1;
+    StatsRegistry reg2;
+    reg1.series_push<"sr_iso">(1.0);
+    expect(reg1.get_series_report().size()).to_equal(static_cast<std::size_t>(1));
+    expect(reg2.get_series_report().empty()).to_be_true();
+}
+
+TEST_CASE("series_report_to_str does not crash with populated series") {
+    StatsRegistry reg;
+    reg.series_push<"sr_str">(1.0);
+    reg.series_push<"sr_str">(2.0);
+    SuppressStdout suppress;
+    expect_no_throw(reg.print_series_report());
+}
+
+TEST_CASE("series_report_to_str is empty when no series registered") {
+    StatsRegistry reg;
+    expect(reg.series_report_to_str().empty()).to_be_true();
+}
+
+TEST_CASE("series coexists with counter gauge histogram in the same registry") {
+    StatsRegistry reg;
+    reg.series_push<"sr_coexist">(3.14);
+    reg.counter_inc<"sr_coexist_c">();
+    reg.gauge_record<"sr_coexist_g">(1.0);
+    reg.histogram_create<"sr_coexist_h">(0.0, 1.0);
+    reg.histogram_record<"sr_coexist_h">(0.5);
+    expect(find_series(reg.get_series_report(), "sr_coexist").points.size()).to_equal(static_cast<std::size_t>(1));
+    expect(reg.counter_get<"sr_coexist_c">()).to_equal(static_cast<int64_t>(1));
+}
+
+TEST_CASE("print_all_reports includes series section without crash") {
+    StatsRegistry reg;
+    reg.series_push<"sr_all_reports">(1.0);
+    SuppressStdout suppress;
+    expect_no_throw(reg.print_all_reports());
 }

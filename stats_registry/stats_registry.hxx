@@ -3,7 +3,7 @@
 /**
  * @file stats_registry.hxx
  * @brief Counters, gauges, and histograms registry built on top of TimerRegistry.
- * @version 2.0.0
+ * @version 2.1.0
  *
  * @details
  * `StatsRegistry` extends `TimerRegistry` (from `timer.hxx`) with three
@@ -41,6 +41,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "../timer/timer.hxx"  // TODO: Update to the actual path
@@ -90,7 +92,13 @@ struct Histogram {
     }
 };
 
-enum class SlotKind : uint8_t { Unset, Counter, Gauge, Histogram };
+enum class SlotKind : uint8_t { Unset, Counter, Gauge, Histogram, Series };
+
+// One timestamped sample in a Series.
+struct SeriesPoint {
+    int64_t timestamp_ns;  ///< steady_clock nanoseconds since epoch
+    double value;
+};
 
 }  // namespace stats_detail
 
@@ -126,7 +134,15 @@ struct CtStatID {
 class StatsRegistry : public TimerRegistry {
    public:
     StatsRegistry() = default;
-    ~StatsRegistry() = default;
+
+    ~StatsRegistry() {
+        // Prevent use-after-free: if live threads outlive this registry, their
+        // SeriesThreadLocal destructor must not attempt to lock stats_mutex_.
+        std::lock_guard lock(stats_mutex_);
+        for (auto& [tid, thr_local] : series_live_threads_) {
+            thr_local->registry = nullptr;
+        }
+    }
     StatsRegistry(const StatsRegistry&) = delete;
     StatsRegistry(StatsRegistry&&) = delete;
     auto operator=(const StatsRegistry&) -> StatsRegistry& = delete;
@@ -144,6 +160,10 @@ class StatsRegistry : public TimerRegistry {
     static constexpr std::size_t DEFAULT_HISTOGRAM_BUCKETS = 10;
     // Default width for histogram bar chart (in characters)
     static constexpr int DEFAULT_HISTOGRAM_BAR_WIDTH = 40;
+    // Default per-(thread, series) pre-reserved capacity (number of SeriesPoints).
+    // Each SeriesPoint is 16 bytes, so the default reserves 16 KiB per slot per thread.
+    // Override per-series at startup with series_create<Name>(capacity).
+    static constexpr std::size_t DEFAULT_SERIES_CAPACITY = 1024;
     // Width for percentage column in histogram output
     static constexpr int HISTOGRAM_PERCENTAGE_WIDTH = 6;
 
@@ -484,6 +504,163 @@ class StatsRegistry : public TimerRegistry {
     void print_histogram_report(int bar_width = DEFAULT_HISTOGRAM_BAR_WIDTH) const { std::cout << histogram_report_to_str(bar_width); }
 
     // ═════════════════════════════════════════════════════════════════════
+    // SERIES
+    // Records an ordered sequence of (timestamp, double) samples.
+    // Push is lock-free on the hot path (after first call per thread/slot).
+    // Merge is done on read; concurrent push+read for the same series is
+    // not supported — call get_series_report() only after all pushes are done.
+    // ═════════════════════════════════════════════════════════════════════
+
+    /**
+     * Appends {steady_clock::now(), value} to this thread's local buffer for
+     * series Name. Lock-free after the first call per (thread, Name) pair.
+     */
+    template <CTString Name>
+    void series_push(double value) {
+        const std::size_t idx = ct_stat_id<Name>();
+        auto& thr_local = series_thread_local_storage();
+
+        // Register name + thread on first use (takes stats_mutex_ once).
+        ct_ensure_series_name<Name>();
+        if (!thr_local.active[idx]) {
+            std::lock_guard lock(stats_mutex_);
+            series_register_thread(idx, thr_local);
+        }
+
+        // Lazy reset: if a reset happened since the last push, clear local buffer.
+        const uint64_t cur_epoch = ct_series_entries_[idx].reset_epoch.load(std::memory_order_acquire);
+        if (cur_epoch != thr_local.last_epoch[idx]) {
+            thr_local.series[idx].clear();
+            thr_local.last_epoch[idx] = cur_epoch;
+        }
+
+        const int64_t now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        thr_local.series[idx].push_back({now_ns, value});
+    }
+
+    /**
+     * Clears all stored points for series Name across all threads and the
+     * archived buffer. Each thread's local buffer is cleared lazily on its
+     * next series_push<Name>() call via the reset_epoch mechanism.
+     */
+    template <CTString Name>
+    void series_reset() {
+        const std::size_t idx = ct_stat_id<Name>();
+        std::lock_guard lock(stats_mutex_);
+        auto& entry = ct_series_entries_[idx];
+        entry.archived.clear();
+        // Also eagerly clear all live thread-local vectors (safe because
+        // concurrent push+reset for the same series is not supported).
+        for (auto* ptr : entry.live_ptrs) {
+            ptr->clear();
+        }
+        entry.reset_epoch.fetch_add(1, std::memory_order_release);
+    }
+
+    /**
+     * Pre-reserves per-thread storage for series Name.
+     *
+     * Call once at startup (before the first series_push<Name>()) to eliminate
+     * reallocation spikes on the hot path. Every thread that subsequently pushes
+     * to this series will have its local buffer reserved to @p capacity points
+     * upfront. If not called, DEFAULT_SERIES_CAPACITY (1024) is used.
+     *
+     * @param capacity  Number of SeriesPoints to reserve per thread (16 bytes each).
+     */
+    template <CTString Name>
+    void series_create(std::size_t capacity = DEFAULT_SERIES_CAPACITY) {
+        ct_ensure_series_name<Name>();
+        const std::size_t idx = ct_stat_id<Name>();
+        std::lock_guard lock(stats_mutex_);
+        ct_series_entries_[idx].capacity = capacity;
+    }
+
+    /**
+     * Returns a sorted (by timestamp) copy of all points pushed to series Name
+     * across all threads (including threads that have since exited).
+     * Do not call concurrently with series_push<Name>().
+     */
+    template <CTString Name>
+    [[nodiscard]] auto series_get() const -> std::vector<stats_detail::SeriesPoint> {
+        const std::size_t idx = ct_stat_id<Name>();
+        std::lock_guard lock(stats_mutex_);
+        std::vector<stats_detail::SeriesPoint> merged = ct_series_entries_[idx].archived;
+        for (auto* ptr : ct_series_entries_[idx].live_ptrs) {
+            merged.insert(merged.end(), ptr->begin(), ptr->end());
+        }
+        std::sort(merged.begin(), merged.end(), [](const stats_detail::SeriesPoint& point_a, const stats_detail::SeriesPoint& point_b) {
+            return point_a.timestamp_ns < point_b.timestamp_ns;
+        });
+        return merged;
+    }
+
+    // ── Series reporting ──────────────────────────────────────────────────
+
+    struct SeriesRow {
+        std::string name;
+        std::vector<stats_detail::SeriesPoint> points;  ///< sorted by timestamp_ns
+    };
+
+    /**
+     * Returns one SeriesRow per registered series, each with points sorted by
+     * wall-clock timestamp. Do not call concurrently with series_push().
+     */
+    auto get_series_report() const -> std::vector<SeriesRow> {
+        std::lock_guard lock(stats_mutex_);
+        std::vector<SeriesRow> result;
+        for (std::size_t i = 0; i < MAX_CT_STATS; ++i) {
+            if (!ct_series_active_[i]) {
+                continue;
+            }
+            std::vector<stats_detail::SeriesPoint> merged = ct_series_entries_[i].archived;
+            for (auto* ptr : ct_series_entries_[i].live_ptrs) {
+                merged.insert(merged.end(), ptr->begin(), ptr->end());
+            }
+            if (merged.empty()) {
+                continue;
+            }
+            std::ranges::sort(merged, [](const stats_detail::SeriesPoint& point_a, const stats_detail::SeriesPoint& point_b) {
+                return point_a.timestamp_ns < point_b.timestamp_ns;
+            });
+            result.push_back({ct_stat_names_[i], std::move(merged)});
+        }
+        return result;
+    }
+
+    auto series_report_to_str() const -> std::string {
+        std::stringstream ost;
+        const auto rows = get_series_report();
+        if (rows.empty()) {
+            return ost.str();
+        }
+        constexpr std::size_t MAX_PREVIEW = 3;
+        for (const auto& row : rows) {
+            const auto& pts = row.points;
+            const int64_t timestamp_0 = pts.front().timestamp_ns;
+            ost << "── Series: " << row.name << "  [n=" << pts.size() << "] ──\n  ";
+            std::size_t shown = std::min(pts.size(), MAX_PREVIEW);
+            for (std::size_t k = 0; k < shown; ++k) {
+                if (k > 0) {
+                    ost << ",  ";
+                }
+                double rel_ms = static_cast<double>(pts[k].timestamp_ns - timestamp_0) / 1e6;
+                ost << std::fixed << std::setprecision(1) << rel_ms << "ms → " << pts[k].value;
+            }
+            if (pts.size() > MAX_PREVIEW) {
+                const std::size_t remaining = pts.size() - MAX_PREVIEW;
+                ost << "  … (+" << remaining << " more)";
+            }
+            if (pts.size() > 1) {
+                ost << "  last: " << pts.back().value;
+            }
+            ost << "\n";
+        }
+        return ost.str();
+    }
+
+    void print_series_report() const { std::cout << series_report_to_str(); }
+
+    // ═════════════════════════════════════════════════════════════════════
     // CONVENIENCE — print everything at once
     // ═════════════════════════════════════════════════════════════════════
 
@@ -496,6 +673,8 @@ class StatsRegistry : public TimerRegistry {
         print_gauge_report();
         std::cout << "\n╔══ Histogram Report ══════════════════════════════╗\n";
         print_histogram_report();
+        std::cout << "\n╔══ Series Report ═════════════════════════════════╗\n";
+        print_series_report();
     }
 
    private:
@@ -610,6 +789,101 @@ class StatsRegistry : public TimerRegistry {
 
     // Kind table — guards against the same name being registered as two different primitives.
     std::array<stats_detail::SlotKind, MAX_CT_STATS> ct_stat_kinds_{};
+
+    // ── Series — per-slot archived + live thread-local vector pointers ────
+
+    struct CtSeriesEntry {
+        // Points flushed from threads that have since exited (protected by stats_mutex_).
+        std::vector<stats_detail::SeriesPoint> archived;
+        // Pointers to each live thread's thread-local vector for this slot.
+        // Written under stats_mutex_; read under stats_mutex_ at report time.
+        std::vector<std::vector<stats_detail::SeriesPoint>*> live_ptrs;
+        // Monotonically increasing epoch; incremented by series_reset<Name>().
+        // Each thread checks this on first push after a reset and clears its local buffer.
+        std::atomic<uint64_t> reset_epoch{0};
+        // Per-(thread, series) pre-reserved capacity. Set via series_create<Name>().
+        // Applied in series_register_thread() so every thread that joins later also benefits.
+        std::size_t capacity{DEFAULT_SERIES_CAPACITY};
+    };
+
+    std::array<CtSeriesEntry, MAX_CT_STATS> ct_series_entries_;
+    std::array<bool, MAX_CT_STATS> ct_series_active_{};
+
+    // Forward declaration so the map type is complete before SeriesThreadLocal is defined.
+    struct SeriesThreadLocal;
+
+    // Live-thread map for series (parallel to TimerRegistry::live_threads_).
+    // Protected by stats_mutex_.
+    std::unordered_map<std::thread::id, SeriesThreadLocal*> series_live_threads_;
+
+    // Per-thread state for series data.
+    struct SeriesThreadLocal {
+        std::array<std::vector<stats_detail::SeriesPoint>, MAX_CT_STATS> series;
+        std::array<bool, MAX_CT_STATS> active{};
+        std::array<uint64_t, MAX_CT_STATS> last_epoch{};
+        StatsRegistry* registry = nullptr;
+
+        ~SeriesThreadLocal() {
+            if (registry == nullptr) {
+                return;
+            }
+            std::lock_guard lock(registry->stats_mutex_);
+            for (std::size_t i = 0; i < MAX_CT_STATS; ++i) {
+                if (!active[i]) {
+                    continue;
+                }
+                auto& entry = registry->ct_series_entries_[i];
+                // Flush to archive.
+                entry.archived.insert(entry.archived.end(), series[i].begin(), series[i].end());
+                // Remove this thread's vector pointer from live_ptrs to prevent dangling access.
+                auto& ptrs = entry.live_ptrs;
+                ptrs.erase(std::remove(ptrs.begin(), ptrs.end(), &series[i]), ptrs.end());
+            }
+            registry->series_live_threads_.erase(std::this_thread::get_id());
+        }
+    };
+
+    auto series_thread_local_storage() -> SeriesThreadLocal& {
+        thread_local std::array<std::unique_ptr<SeriesThreadLocal>, MAX_REGISTRIES> tl_ptrs{};
+        auto& ptr = tl_ptrs[get_registry_id()];
+        if (!ptr) [[unlikely]] {
+            ptr = std::make_unique<SeriesThreadLocal>();
+        }
+        return *ptr;
+    }
+
+    template <CTString Name>
+    void ct_ensure_series_name() {
+        const std::size_t idx = ct_stat_id<Name>();
+        if (!ct_series_active_[idx]) {
+            std::lock_guard lock(stats_mutex_);
+            if (!ct_series_active_[idx]) {
+                if (!ct_stat_names_[idx].empty() && ct_stat_names_[idx] != Name.view()) {
+                    throw std::logic_error(std::string("StatsRegistry: FNV-1a hash collision between '") + ct_stat_names_[idx] + "' and '" +
+                                           std::string(Name.view()) + "'");
+                }
+                if (ct_stat_kinds_[idx] != stats_detail::SlotKind::Unset && ct_stat_kinds_[idx] != stats_detail::SlotKind::Series) {
+                    throw std::logic_error("StatsRegistry: name '" + std::string(Name.view()) + "' already registered as a different primitive type");
+                }
+                ct_stat_names_[idx] = std::string(Name.view());
+                ct_stat_kinds_[idx] = stats_detail::SlotKind::Series;
+                ct_series_active_[idx] = true;
+            }
+        }
+    }
+
+    // Registers the calling thread's local vector pointer for slot idx.
+    // Must be called under stats_mutex_.
+    void series_register_thread(std::size_t idx, SeriesThreadLocal& thr_local) {
+        if (!thr_local.active[idx]) {
+            auto& entry = ct_series_entries_[idx];
+            thr_local.registry = this;
+            entry.live_ptrs.push_back(&thr_local.series[idx]);
+            series_live_threads_[std::this_thread::get_id()] = &thr_local;
+            thr_local.active[idx] = true;
+            entry.live_ptrs.back()->reserve(entry.capacity);
+        }
+    }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -39,6 +39,10 @@
 using benchmark::DoNotOptimize;
 using clk = std::chrono::steady_clock;
 
+// Capacity pre-reserved for bench.series — must exceed the 1M-iteration push
+// benchmark so the hot path never reallocates.
+static constexpr std::size_t SERIES_BENCH_CAPACITY = 1'100'000;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Shared pre-warmed registry
 //
@@ -82,6 +86,13 @@ StatsRegistry& reg() {
         // ── Histograms ────────────────────────────────────────────────────
         instance.histogram_create<"bench.hist">(0.0, 1000.0, 10);
         instance.histogram_create<"bench.hist.mt">(0.0, 1000.0, 10);
+
+        // ── Series ────────────────────────────────────────────────────────
+        // Pre-reserve enough capacity to cover the 1M-iteration push benchmark
+        // (and the read benchmark) without any reallocation on the hot path.
+        instance.series_create<"bench.series">(SERIES_BENCH_CAPACITY);
+        instance.series_push<"bench.series">(0.0);
+        instance.series_push<"bench.series.mt">(0.0);
 
         // ── Combined hot path ─────────────────────────────────────────────
         instance.counter_inc<"bench.combined.requests">(0);
@@ -737,57 +748,54 @@ BENCH_CASE_N("get_thread_report() — iterate graveyard + live threads", 5'000) 
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// SUITE 10 — Combined realistic hot path
+// SUITE 11 — Series
 //
-// Simulates a single annotated "handle request" function body.
-// All five primitives fire in sequence: two timers, one counter, one gauge,
-// one histogram.  This is the closest to real-world usage.
+// Measures the cost of series_push (lock-free hot path after first call) and
+// series_get (merge + sort across all threads on read).
 // ═════════════════════════════════════════════════════════════════════════════
 
-BENCH_SUITE("10 · Combined hot path — realistic annotated function body")
+BENCH_SUITE("11 · Series — push throughput and read latency")
 
-// Single-threaded: full annotation overhead per "request"
-BENCH_CASE_N("single thread — timer + scoped_counter + gauge + histogram per call", 100'000) {
+// Single-threaded push: measures the lock-free append path.
+BENCH_CASE_N("single-thread series_push — hot path after first call", 1'000'000) {
     for (auto _ : state) {
-        // RAII timer for total request time
-        auto total = make_scoped_timer<"bench.combined.total">(reg());
+        reg().series_push<"bench.series">(1.0);
+    }
+}
 
-        // RAII counter for in-flight requests
-        auto in_flight = make_scoped_counter<"bench.combined.requests">(reg());
-
-        // Sub-timer for a DB call
-        auto* db_slot = reg().start<"bench.combined.db">();
-        TimerRegistry::stop(db_slot);
-
-        // Gauge: payload size
-        reg().gauge_record<"bench.combined.payload">(128.0);
-
-        // Histogram: request latency
-        reg().histogram_record<"bench.combined.latency">(42.0);
-
+// Multi-threaded push: 4 threads all pushing to the same named series.
+BENCH_CASE_NW("4 threads series_push — same name concurrent", 200, 3) {
+    for (auto _ : state) {
+        constexpr int N_THREADS = 4;
+        constexpr int PUSHES = 200;
+        std::vector<std::thread> workers;
+        workers.reserve(N_THREADS);
+        for (int t = 0; t < N_THREADS; ++t) {
+            workers.emplace_back([] {
+                for (int i = 0; i < PUSHES; ++i) {
+                    reg().series_push<"bench.series.mt">(static_cast<double>(i));
+                }
+            });
+        }
+        for (auto& w : workers) w.join();
         DoNotOptimize(0);
     }
 }
 
-// 4-thread version — all threads annotating the same keys simultaneously
-BENCH_CASE_NW("4 threads — timer + scoped_counter + gauge + histogram per call", 500, 3) {
+// Read (merge+sort) latency for a series already populated with 1 000 points.
+BENCH_CASE_N("series_get — merge+sort 1 000 points", 1'000) {
+    // Pre-populate on first iteration only (idempotent across runs).
+    {
+        static bool done = false;
+        if (!done) {
+            for (int i = 0; i < 1'000; ++i) {
+                reg().series_push<"bench.series.read.1k">(static_cast<double>(i));
+            }
+            done = true;
+        }
+    }
     for (auto _ : state) {
-        constexpr int N = 4, ITERS = 500;
-        std::vector<std::thread> workers;
-        workers.reserve(N);
-        for (int t = 0; t < N; ++t)
-            workers.emplace_back([] {
-                for (int i = 0; i < ITERS; ++i) {
-                    auto total = make_scoped_timer<"bench.combined.total">(reg());
-                    auto in_flight = make_scoped_counter<"bench.combined.requests">(reg());
-                    auto* db_slot = reg().start<"bench.combined.db">();
-                    TimerRegistry::stop(db_slot);
-                    reg().gauge_record<"bench.combined.payload">(128.0);
-                    reg().histogram_record<"bench.combined.latency">(42.0);
-                    DoNotOptimize(0);
-                }
-            });
-        for (auto& w : workers) w.join();
-        DoNotOptimize(0);
+        auto pts = reg().series_get<"bench.series.read.1k">();
+        DoNotOptimize(pts.size());
     }
 }

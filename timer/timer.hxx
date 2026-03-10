@@ -886,6 +886,11 @@ class TimerRegistry {
     // Assigned once at construction; stable for the lifetime of the registry.
     inline static std::atomic<std::size_t> registry_id_counter_{0};
     const std::size_t registry_id_;
+
+   protected:
+    /** Returns the unique per-instance registry ID used to index thread-local storage.
+     *  Subclasses (e.g. StatsRegistry) can use this to share the same index space. */
+    auto get_registry_id() const noexcept -> std::size_t { return registry_id_; }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
