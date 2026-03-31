@@ -40,8 +40,8 @@ auto main() -> int {
     // We do this AFTER cout is set up so our own print calls still work.
     NullBuf null_buf;
 
-    // ── Logger setup ──────────────────────────────────────────────────────────
-    log_init();  // sync, stdout, colors on, thread-id on
+    Logger log;
+    log.set_min_level(Logger::level::DEBUG);
 
     // ── 1. Baseline: loop with no logging ─────────────────────────────────────
     volatile int sink = 0;  // prevent the loop being optimised away
@@ -60,7 +60,7 @@ auto main() -> int {
         t0 = now_ms();
         for (int i = 0; i < ITERATIONS; ++i) {
             sink += i;
-            LOG_INFO_S(MSG);
+            log.info(MSG);
         }
         double sync_string_ms = now_ms() - t0;
 
@@ -80,7 +80,7 @@ auto main() -> int {
         t0 = now_ms();
         for (int i = 0; i < ITERATIONS; ++i) {
             sink += i;
-            LOG_INFO << MSG;
+            log.info() << MSG;
         }
         double sync_stream_ms = now_ms() - t0;
 
@@ -94,16 +94,16 @@ auto main() -> int {
 
     // ── 4. Filtered logger (min=ERROR, INFO is silenced) ─────────────────────
     {
-        default_logger().set_min_level(Logger::level::ERROR);
+        log.set_min_level(Logger::level::ERROR);
 
         t0 = now_ms();
         for (int i = 0; i < ITERATIONS; ++i) {
             sink += i;
-            LOG_INFO_S(MSG);
+            log.info(MSG);
         }
         double filtered_string_ms = now_ms() - t0;
 
-        default_logger().set_min_level(Logger::level::BASIC);  // restore
+        log.set_min_level(Logger::level::BASIC);  // restore
 
         std::cout << "[filter/ string ] total: " << filtered_string_ms << " ms"
                   << "   overhead vs baseline: " << (filtered_string_ms - baseline_ms) << " ms"
@@ -112,16 +112,16 @@ auto main() -> int {
 
     // ── 5. Filtered stream API ────────────────────────────────────────────────
     {
-        default_logger().set_min_level(Logger::level::ERROR);
+        log.set_min_level(Logger::level::ERROR);
 
         t0 = now_ms();
         for (int i = 0; i < ITERATIONS; ++i) {
             sink += i;
-            LOG_INFO << MSG;
+            log.info() << MSG;
         }
         double filtered_stream_ms = now_ms() - t0;
 
-        default_logger().set_min_level(Logger::level::BASIC);
+        log.set_min_level(Logger::level::BASIC);
 
         std::cout << "[filter/ stream ] total: " << filtered_stream_ms << " ms"
                   << "   overhead vs baseline: " << (filtered_stream_ms - baseline_ms) << " ms"

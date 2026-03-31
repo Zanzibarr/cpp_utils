@@ -3,25 +3,23 @@
 /**
  * @file logger.hxx
  * @brief Thread-safe logger with synchronous and asynchronous output modes.
- * @version 1.0.1
+ * @version 2.0.0
  *
  * @details
  * `Logger` supports two operating modes selected at construction:
- *   - **Sync** — every `log()` call writes to the output stream immediately
- *     on the calling thread (protected by a mutex).
+ *   - **Sync** — every `log()` call writes immediately on the calling thread
+ *     (protected by a mutex).
  *   - **Async** — log records are pushed onto a lock-free queue and drained
  *     by a dedicated background thread, minimising latency on the hot path.
  *
- * Six severity levels are provided (`TRACE`, `DEBUG`, `INFO`, `WARN`,
- * `ERROR`, `FATAL`).  A minimum-level filter is applied before formatting,
- * so filtered-out calls cost roughly 3–25 ns (branch + atomic load).
+ * Six severity levels: `BASIC`, `DEBUG`, `INFO`, `SUCCESS`, `WARNING`, `ERROR`.
  *
- * Output is optionally coloured using `ansi::codes` from `ansi_colors.hxx`
- * when stdout is a TTY.  Timestamps use a manual char-array formatter
- * (fastest portable approach without `<format>`).
+ * Output to stdout/stderr and to a file are independently controlled —
+ * both can be active simultaneously.  ANSI colors apply only to console output.
  *
- * Convenience macros `LOG_INFO(msg)` etc. forward to the process-wide
- * singleton returned by `global_logger()` / `LOGGER`.
+ * Construction starts the internal timer automatically.  An externally-created
+ * `steady_clock::time_point` may be passed so that elapsed times are measured
+ * from a point prior to the Logger's own construction.
  *
  * @author Matteo Zanella <matteozanella2@gmail.com>
  * Copyright 2026 Matteo Zanella
@@ -30,6 +28,7 @@
  */
 
 #include <atomic>
+#include <cassert>
 #include <chrono>
 #include <condition_variable>
 #include <fstream>
@@ -39,10 +38,82 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 
+#ifdef __APPLE__
+#include <mach/mach.h>
+#else
+#include <unistd.h>  // sysconf(_SC_PAGESIZE)
+#endif
+
 #include "../utilities/ansi_colors.hxx"  // TODO: Update to the actual path
+
+// ── LoggerLevel ───────────────────────────────────────────────────────────────
+
+/**
+ * @brief Severity / verbosity levels ordered by printing priority.
+ *
+ * The numeric ordering reflects how "chatty" a level is, not how critical it
+ * is.  The filter rule is simply `level >= min_level`:
+ *
+ *   min_level = DEBUG   → everything printed
+ *   min_level = BASIC   → BASIC, SUCCESS, ERROR  (default)
+ *   min_level = ERROR   → only ERROR
+ *
+ * Ordering:  DEBUG(0) < INFO(1) < WARNING(2) < BASIC(3) < SUCCESS(4) < ERROR(5)
+ */
+enum class LoggerLevel : int { DEBUG = 0, INFO = 1, WARNING = 2, BASIC = 3, SUCCESS = 4, ERROR = 5 };
+
+// ── LoggerConfig ─────────────────────────────────────────────────────────────
+
+/**
+ * @brief Construction-time configuration for Logger, all options are optional.
+ *
+ * Example:
+ * @code
+ *   Logger lg(LoggerConfig{}.with_file("run.log").with_async());
+ * @endcode
+ */
+struct LoggerConfig {
+    bool to_stdout = true;                       ///< Write to stdout/stderr.
+    bool use_colors = true;                      ///< Emit ANSI escape codes on console.
+    bool show_thread = true;                     ///< Prefix each line with a short thread ID.
+    bool async = false;                          ///< Dispatch writes to a background thread.
+    std::string file_path;                       ///< Non-empty → open this file for plain-text output.
+    LoggerLevel min_level = LoggerLevel::BASIC;  ///< Discard messages below this level.
+    bool show_memory = false;                    ///< Prefix each line with current RSS in KB.
+
+    auto with_stdout(bool enabled = true) -> auto& {
+        to_stdout = enabled;
+        return *this;
+    }
+    auto with_file(std::string path) -> auto& {
+        file_path = std::move(path);
+        return *this;
+    }
+    auto with_colors(bool enabled = true) -> auto& {
+        use_colors = enabled;
+        return *this;
+    }
+    auto with_thread(bool enabled = true) -> auto& {
+        show_thread = enabled;
+        return *this;
+    }
+    auto with_async(bool enabled = true) -> auto& {
+        async = enabled;
+        return *this;
+    }
+    auto with_min_level(LoggerLevel lvl) -> auto& {
+        min_level = lvl;
+        return *this;
+    }
+    auto with_memory(bool enabled = true) -> auto& {
+        show_memory = enabled;
+        return *this;
+    }
+};
 
 // ── Logger ───────────────────────────────────────────────────────────────────
 
@@ -50,23 +121,20 @@
  * @brief Thread-safe Logger.
  *
  * Supports:
+ *  - Zero-overhead construction — no separate initialize() call required.
  *  - Synchronous (default) and asynchronous (background-thread) modes.
- *  - Runtime-configurable minimum log level (filter noisy levels in production).
- *  - Simultaneous stdout/stderr + optional file output.
- *  - ANSI color codes and optional thread-ID stamping.
- *  - Stream-style log_stream objects (RAII flush on destruction).
+ *  - Independent stdout and file output — both may be active at once.
+ *  - ANSI color codes on console, plain text in files.
+ *  - Optional thread-ID stamping.
+ *  - Stream-style `log_stream` objects (RAII flush on destruction).
+ *  - Runtime reconfiguration of all output options.
  */
 class Logger {
    public:
-    // ── Log level ─────────────────────────────────────────────────────────────
-
-    /**
-     * @brief Severity levels, ordered from least to most severe.
-     *
-     * The numeric ordering is intentional: a minimum_level filter simply
-     * checks  `incoming_level >= minimum_level`.
-     */
-    enum class level : int { BASIC = 0, DEBUG = 1, INFO = 2, SUCCESS = 3, WARNING = 4, ERROR = 5 };
+    /// Alias so `Logger::level::DEBUG` etc. work at call sites.
+    using level = LoggerLevel;
+    /// Alias so `Logger::config` still works at call sites.
+    using config = LoggerConfig;
 
     // ── log_stream ────────────────────────────────────────────────────────────
 
@@ -74,130 +142,148 @@ class Logger {
      * @brief RAII stream wrapper — accumulates tokens via `operator<<` and
      *        flushes the full message to the Logger on destruction.
      *
-     * Typical usage:
      * @code
-     *   LOG_INFO << "Value = " << x;   // macro returns a temporary log_stream
+     *   lg.info() << "Value = " << x;   // temporary log_stream, flushed at `;`
      * @endcode
      */
     class log_stream {
        public:
-        log_stream(Logger &logger_obj, level lvl, bool exit_on_error = false)
-            : lg_(logger_obj), level_(lvl), exit_on_error_(exit_on_error), active_(lvl >= logger_obj.min_level_.load(std::memory_order_relaxed)) {
-            buf_ = active_ ? std::optional<std::ostringstream>{std::in_place} : std::nullopt;
+        log_stream(Logger* logger_ptr, level lvl, bool exit_on_error = false)
+            : lg_(logger_ptr), level_(lvl), exit_on_error_(exit_on_error), active_(lvl >= logger_ptr->min_level_.load(std::memory_order_relaxed)) {}
+
+        log_stream(log_stream&& other) noexcept
+            : lg_(other.lg_), level_(other.level_), buf_(std::move(other.buf_)), exit_on_error_(other.exit_on_error_), active_(other.active_) {
+            other.moved_ = true;
         }
 
-        log_stream(log_stream &&logstr) noexcept
-            : lg_(logstr.lg_), level_(logstr.level_), buf_(std::move(logstr.buf_)), exit_on_error_(logstr.exit_on_error_), active_(logstr.active_) {
-            logstr.moved_ = true;
-        }
-
-        log_stream(const log_stream &) = delete;
-        auto operator=(const log_stream &) -> log_stream & = delete;
-        auto operator=(log_stream &&) -> log_stream & = delete;
+        log_stream(const log_stream&) = delete;
+        auto operator=(const log_stream&) = delete;
+        auto operator=(log_stream&&) = delete;
 
         template <typename T>
-        auto operator<<(const T &val) -> log_stream & {
+        auto operator<<(const T& val) -> log_stream& {
             if (active_) {
-                *buf_ << val;  // skip the write entirely when filtered
+                if (!buf_) {
+                    buf_.emplace();  // lazy init
+                }
+                *buf_ << val;
             }
             return *this;
         }
 
         ~log_stream() {
-            if (moved_ || !active_) {
+            if (moved_ || !active_ || !buf_) {
                 return;
             }
             std::string msg = buf_->str();
             if (!msg.empty()) {
-                lg_.emit(msg, level_);
+                lg_->emit(msg, level_);
             }
-            // Terminate for ERROR even when no content was streamed — an error
-            // scope exit is always fatal once the level is active.
             if (exit_on_error_ && level_ == level::ERROR) {
-                lg_.flush();  // drain queue before exiting (in async mode the error message might not get printed)
+                lg_->flush();  // drain queue before exiting so the error message is printed
                 _Exit(EXIT_FAILURE);
             }
         }
 
        private:
-        Logger &lg_;
+        Logger* lg_;
         level level_;
         std::optional<std::ostringstream> buf_;
         bool exit_on_error_ = false;
         bool moved_ = false;
-        bool active_;  // false → every operator<< is a no-op
+        bool active_;  // false → operator<< and emit are no-ops
     };
 
-    Logger() { start_ = std::chrono::steady_clock::now(); };
-    Logger(const Logger &) = delete;
-    Logger(Logger &&) = delete;
-    auto operator=(const Logger &) -> Logger & = delete;
-    auto operator=(Logger &&) -> Logger & = delete;
-
-    // ── Initialization ────────────────────────────────────────────────────────
+    // ── Construction ──────────────────────────────────────────────────────────
 
     /**
-     * @brief Initialize the Logger. Must be called once before any logging.
+     * @brief Construct and immediately ready the logger.
      *
-     * @param write_to_file  Write plain-text log lines to a file.
-     * @param file_path      Path of the log file (ignored when write_to_file is false).
-     * @param use_colors     Emit ANSI escape codes on console output.
-     * @param show_thread    Prefix each line with a short thread ID.
-     * @param async_mode     Dispatch writes to a background worker thread so
-     *                       that the calling thread is never blocked on I/O.
-     * @param min_level      Discard messages below this severity.
+     * @param cfg    Output configuration (all fields have sensible defaults).
+     * @param start  Origin for elapsed-time stamps.  Pass a previously
+     *               captured `steady_clock::now()` to track time from before
+     *               this object was constructed.
      *
-     * @throws std::runtime_error if called more than once, or if the file
-     *         cannot be opened.
+     * @throws std::runtime_error if a file path is given but cannot be opened.
      */
-    void initialize(bool write_to_file = false, std::string file_path = "", bool use_colors = true, bool show_thread = true, bool async_mode = false,
-                    level min_level = level::BASIC) {
-        std::lock_guard lock(mutex_);
-        if (initialized_) {
-            throw std::runtime_error("Logger already initialized!");
+    explicit Logger(config cfg = {}, std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now());
+
+    Logger(const Logger&) = delete;
+    Logger(Logger&&) = delete;
+    auto operator=(const Logger&) -> Logger& = delete;
+    auto operator=(Logger&&) -> Logger& = delete;
+
+    // ── Runtime controls ──────────────────────────────────────────────────────
+
+    /// Set configuration as a whole
+    void set_config(config cfg) {
+        to_stdout_ = cfg.to_stdout;
+        use_colors_ = cfg.use_colors;
+        show_thread_ = cfg.show_thread;
+        show_memory_ = cfg.show_memory;
+        async_mode_ = cfg.async;
+        if (!cfg.file_path.empty()) {
+            open_file(cfg.file_path);
         }
-
-        use_colors_ = use_colors;
-        show_thread_ = show_thread;
-        min_level_.store(min_level, std::memory_order_relaxed);
-        async_mode_ = async_mode;
-
-        if (write_to_file && !file_path.empty()) {
-            file_.open(file_path, std::ios::app);
-            if (!file_.is_open()) {
-                throw std::runtime_error("Failed to open log file: " + file_path);
-            }
-        }
-
-        if (async_mode_) {
+        min_level_ = cfg.min_level;
+        if (async_mode_ && !worker_running_) {
             start_worker();
         }
-
-        initialized_ = true;
     }
 
-    // ── Runtime controls ─────────────────────────────────────────────────────
-
-    /// Change whether ANSI colors are emitted (thread-safe).
-    void set_colors(bool flag) {
+    /// Enable or disable console (stdout/stderr) output.
+    void set_stdout(bool enabled) {
         std::lock_guard lock(mutex_);
-        use_colors_ = flag;
+        to_stdout_ = enabled;
     }
-    /// Toggle thread-ID stamping at runtime (thread-safe).
-    void set_thread(bool flag) {
+    /// Enable or disable ANSI color codes on the console.
+    void set_colors(bool enabled) {
         std::lock_guard lock(mutex_);
-        show_thread_ = flag;
+        use_colors_ = enabled;
     }
-    /// Raise or lower the minimum level filter at runtime (thread-safe, lock-free).
+    /// Enable or disable thread-ID prefixes.
+    void set_thread(bool enabled) {
+        std::lock_guard lock(mutex_);
+        show_thread_ = enabled;
+    }
+    /// Change the minimum level filter at runtime (lock-free).
     void set_min_level(level lvl) { min_level_.store(lvl, std::memory_order_relaxed); }
+    /// Enable or disable memory-usage stamping (thread-safe).
+    void set_memory(bool enabled) {
+        std::lock_guard lock(mutex_);
+        show_memory_ = enabled;
+    }
 
-    /// Flush both the log file and console streams.
-    /// In async mode, blocks until the background queue is fully drained first,
-    /// so all records enqueued before this call are guaranteed to be written.
+    /**
+     * @brief Open (or switch to) a log file.  Can be called at any time.
+     *        If a file was already open it is closed first.
+     * @throws std::runtime_error if the file cannot be opened.
+     */
+    void open_file(const std::string& path) {
+        std::lock_guard lock(mutex_);
+        if (file_.is_open()) {
+            file_.close();
+        }
+        file_.open(path, std::ios::app);
+        if (!file_.is_open()) {
+            throw std::runtime_error("Failed to open log file: " + path);
+        }
+    }
+
+    /// Close the current log file (stdout/stderr output is unaffected).
+    void close_file() {
+        std::lock_guard lock(mutex_);
+        if (file_.is_open()) {
+            file_.close();
+        }
+    }
+
+    // ── Flush ─────────────────────────────────────────────────────────────────
+
+    /// Flush all output streams.  In async mode, blocks until the background
+    /// queue is fully drained so all enqueued records are guaranteed written.
     void flush() {
         if (async_mode_) {
-            // Wait until the queue is empty.  The worker signals queue_cv_
-            // (via notify_all) after each drain cycle so this wakes promptly.
             std::unique_lock lock(queue_mutex_);
             queue_cv_.wait(lock, [this] { return queue_.empty(); });
         }
@@ -209,33 +295,33 @@ class Logger {
         }
     }
 
-    // ── String overloads ─────────────────────────────────────────────────────
+    // ── String overloads ──────────────────────────────────────────────────────
 
-    void log(const std::string &msg) { emit(msg, level::BASIC); }
-    void debug(const std::string &msg) { emit(msg, level::DEBUG); }
-    void info(const std::string &msg) { emit(msg, level::INFO); }
-    void success(const std::string &msg) { emit(msg, level::SUCCESS); }
-    void warning(const std::string &msg) { emit(msg, level::WARNING); }
+    void log(const std::string_view& msg) { emit(msg, level::BASIC); }
+    void debug(const std::string_view& msg) { emit(msg, level::DEBUG); }
+    void info(const std::string_view& msg) { emit(msg, level::INFO); }
+    void success(const std::string_view& msg) { emit(msg, level::SUCCESS); }
+    void warning(const std::string_view& msg) { emit(msg, level::WARNING); }
 
-    [[noreturn]]
-    void error(const std::string &msg) {
+    [[noreturn]] void error(const std::string& msg) {
         emit(msg, level::ERROR);
-        flush();  // drain queue before exiting (in async mode the error message might not get printed)
+        flush();  // drain queue before exiting so the error message is printed
         _Exit(EXIT_FAILURE);
     }
 
-    // ── Stream-style factory methods ─────────────────────────────────────────
+    // ── Stream-style factory methods ──────────────────────────────────────────
 
-    log_stream log() { return {*this, level::BASIC}; }
-    log_stream debug() { return {*this, level::DEBUG}; }
-    log_stream info() { return {*this, level::INFO}; }
-    log_stream success() { return {*this, level::SUCCESS}; }
-    log_stream warning() { return {*this, level::WARNING}; }
-    log_stream error() { return {*this, level::ERROR, true}; }
+    auto log() -> log_stream { return {this, level::BASIC}; }
+    auto debug() -> log_stream { return {this, level::DEBUG}; }
+    auto info() -> log_stream { return {this, level::INFO}; }
+    auto success() -> log_stream { return {this, level::SUCCESS}; }
+    auto warning() -> log_stream { return {this, level::WARNING}; }
+    auto error() -> log_stream { return {this, level::ERROR, true}; }
 
-    // ── Destructor ───────────────────────────────────────────────────────────
+    // ── Destructor ────────────────────────────────────────────────────────────
 
     ~Logger() {
+        flush();
         if (async_mode_) {
             stop_worker();
         }
@@ -248,20 +334,20 @@ class Logger {
     friend class log_stream;
 
    private:
-    // ── Internal record type (async queue entries) ────────────────────────────
+    // ── Internal record type ──────────────────────────────────────────────────
 
     struct record {
         std::string message;
         level lvl;
-        double elapsed;         // captured at emit() call time
-        std::string thread_id;  // captured at emit() call time
+        double elapsed;         // captured at emit() time
+        std::string thread_id;  // captured at emit() time
+        long memory_kb;         // captured at emit() time; -1 when not requested
     };
-
-    // ── Level metadata helpers ────────────────────────────────────────────────
+    // ── Level metadata ────────────────────────────────────────────────────────
 
     struct level_meta {
-        const char *label;  // fixed-width, 7 chars
-        const char *color;
+        const char* label;  // fixed-width, 7 chars
+        const char* color;
         bool use_err;  // route to stderr?
     };
 
@@ -283,7 +369,57 @@ class Logger {
         return {.label = "       ", .color = ansi::codes::white, .use_err = false};
     }
 
+    // ── Memory sampling ───────────────────────────────────────────────────────
+
+    static auto current_memory_kb() -> long {
+#ifdef __APPLE__
+        task_vm_info_data_t info{};
+        mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+        if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS) {
+            return static_cast<long>(info.phys_footprint / 1024);
+        }
+        return -1;
+#else
+        // /proc/self/statm: "total resident ..." — values in pages
+        std::ifstream f("/proc/self/statm");
+        long total = 0, resident = 0;
+        f >> total >> resident;
+        if (!f) return -1;
+        return resident * (sysconf(_SC_PAGESIZE) / 1024);
+#endif
+    }
+
+    // ── Memory formatting ─────────────────────────────────────────────────────
+
+    static auto format_memory(long kb) -> std::string {
+        // "[NNNNNNN KB] " — 7-digit right-aligned field, covers up to ~9.5 GB
+        char num[8] = {' ', ' ', ' ', ' ', ' ', ' ', '0', '\0'};
+        if (kb > 0) {
+            long v = kb;
+            for (int i = 6; i >= 0 && v > 0; --i, v /= 10) {
+                num[i] = static_cast<char>('0' + (v % 10));
+            }
+        }
+        char buf[14];
+        buf[0] = '[';
+        buf[1] = num[0];
+        buf[2] = num[1];
+        buf[3] = num[2];
+        buf[4] = num[3];
+        buf[5] = num[4];
+        buf[6] = num[5];
+        buf[7] = num[6];
+        buf[8] = ' ';
+        buf[9] = 'K';
+        buf[10] = 'B';
+        buf[11] = ']';
+        buf[12] = ' ';
+        buf[13] = '\0';
+        return {buf, 13};
+    }
+
     // ── Time formatting ───────────────────────────────────────────────────────
+
     static auto format_time(double elapsed) -> std::string {
         constexpr int MS_PER_SECOND = 1000;
         constexpr int MS_PER_MINUTE = 60000;
@@ -297,7 +433,6 @@ class Logger {
 
         // "HH:MM:SS.mmm" = 12 chars + null
         char buf[13];
-        // Two-digit pairs: manual write, no locale, no heap
         buf[0] = '0' + (hours / 10);
         buf[1] = '0' + (hours % 10);
         buf[2] = ':';
@@ -314,57 +449,68 @@ class Logger {
         return {buf, 12};  // construct from ptr+len, no strlen scan
     }
 
-    // ── Thread ID formatting ──────────────────────────────────────────────────
-    static auto current_thread_id() -> const std::string & {
-        thread_local std::string idx = []() -> std::string {
+    // ── Thread ID ─────────────────────────────────────────────────────────────
+    static auto current_thread_tag() -> const std::string& {
+        thread_local std::string tag = "[T:" + []() -> std::string {
             std::ostringstream oss;
             oss << std::this_thread::get_id();
             std::string str = oss.str();
-            if (str.size() > 4) {
-                str = str.substr(str.size() - 4);
-            }
+            if (str.size() > 4) str = str.substr(str.size() - 4);
             return str;
-        }();
-        return idx;
+        }() + "] ";
+        return tag;
     }
 
-    // ── Core write (called with mutex held) ───────────────────────────────────
+    // ── write_record (called with mutex_ held) ────────────────────────────────
 
-    void write_record(const record &rec) {
+    void write_record(const record& rec) {
         const auto [label, color, use_err] = meta_of(rec.lvl);
-        std::ostream &ostr = use_err ? std::cerr : std::cout;
 
-        // Plain-text prefix (used for both file and no-color console)
-        std::string time_tag = rec.lvl == level::BASIC ? "" : "[" + format_time(rec.elapsed) + "] ";
-        std::string thread_tag = (rec.lvl == level::BASIC || !show_thread_) ? "" : "[T:" + rec.thread_id + "] ";
-        std::string level_tag = rec.lvl == level::BASIC ? "" : std::string("[") + label + "] ";
+        thread_local std::string plain;
+        plain.clear();
 
-        // File output (plain text, no ANSI)
+        if (rec.lvl != level::BASIC) {
+            plain += '[';
+            plain += format_time(rec.elapsed);
+            plain += "] ";
+            if (rec.memory_kb >= 0) plain += format_memory(rec.memory_kb);
+            if (show_thread_) plain += current_thread_tag();  // ← cached, no alloc
+            plain += '[';
+            plain += label;
+            plain += "] ";
+        }
+
+        const std::size_t prefix_end = plain.size();
+        plain += rec.message;
+
         if (file_.is_open()) {
-            file_ << time_tag << thread_tag << level_tag << rec.message << '\n';
+            file_ << plain << '\n';
             file_.flush();
-        } else {
-            // Console output
-            if (use_colors_) {
-                ostr << ansi::codes::cyan << time_tag << ansi::codes::reset << ansi::codes::magenta << thread_tag << ansi::codes::reset << color
-                     << level_tag << ansi::codes::reset << rec.message << '\n';
+        }
+
+        if (to_stdout_) {
+            std::ostream& ostr = use_err ? std::cerr : std::cout;
+            if (use_colors_ && rec.lvl != level::BASIC) {
+                ostr << ansi::codes::cyan;
+                ostr.write(plain.data(), prefix_end);
+                ostr << ansi::codes::reset << color;
+                ostr.write(plain.data() + prefix_end, plain.size() - prefix_end);
+                ostr << ansi::codes::reset << '\n';
             } else {
-                ostr << time_tag << thread_tag << level_tag << rec.message << '\n';
+                ostr << plain << '\n';
             }
         }
     }
 
-    // ── Emit (public entry point, acquires lock in sync mode) ─────────────────
+    // ── emit ─────────────────────────────────────────────────────────────────
 
-    void emit(const std::string &message, level lvl) {
-        // Fast path: skip below-threshold messages without locking
+    void emit(std::string_view message, level lvl) {
         if (lvl < min_level_.load(std::memory_order_relaxed)) {
             return;
         }
-
         double elapsed_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_).count();
-
-        record rec{.message = message, .lvl = lvl, .elapsed = elapsed_s, .thread_id = current_thread_id()};
+        long mem_kb = show_memory_ ? current_memory_kb() : -1L;
+        record rec{.message = std::string(message), .lvl = lvl, .elapsed = elapsed_s, .thread_id = current_thread_tag(), .memory_kb = mem_kb};
 
         if (async_mode_) {
             {
@@ -374,14 +520,11 @@ class Logger {
             queue_cv_.notify_one();
         } else {
             std::lock_guard lock(mutex_);
-            if (!initialized_) {
-                throw std::runtime_error("Logger not initialized!");
-            }
             write_record(rec);
         }
     }
 
-    // ── Async worker ─────────────────────────────────────────────────────────
+    // ── Async worker ──────────────────────────────────────────────────────────
 
     void start_worker() {
         worker_running_ = true;
@@ -390,17 +533,14 @@ class Logger {
                 std::unique_lock lock(queue_mutex_);
                 queue_cv_.wait(lock, [this] { return !queue_.empty() || !worker_running_; });
 
-                // Drain everything currently in the queue
                 while (!queue_.empty()) {
                     record rec = std::move(queue_.front());
                     queue_.pop();
                     lock.unlock();
-
                     {
                         std::lock_guard writelock(mutex_);
                         write_record(rec);
                     }
-
                     lock.lock();
                 }
 
@@ -428,79 +568,42 @@ class Logger {
     // ── Data members ─────────────────────────────────────────────────────────
 
     mutable std::mutex mutex_;
-    bool initialized_ = false;
+    bool to_stdout_ = true;
     bool use_colors_ = true;
     bool show_thread_ = true;
+    bool show_memory_ = false;
     bool async_mode_ = false;
     std::atomic<level> min_level_{level::BASIC};
 
     std::ofstream file_;
 
-    // Async support
     std::thread worker_;
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     std::queue<record> queue_;
     std::atomic<bool> worker_running_{false};
+
     std::chrono::steady_clock::time_point start_;
 };
 
-inline auto default_logger() -> Logger & {
-    static Logger instance;
-    return instance;
+// ── Constructor (defined outside class so config's default member initializers
+//    are fully visible at the point where cfg = {} is evaluated) ───────────────
+
+inline Logger::Logger(config cfg, std::chrono::steady_clock::time_point start)
+    : start_(start),
+      to_stdout_(cfg.to_stdout),
+      use_colors_(cfg.use_colors),
+      show_thread_(cfg.show_thread),
+      show_memory_(cfg.show_memory),
+      async_mode_(cfg.async),
+      min_level_(cfg.min_level) {
+    if (!cfg.file_path.empty()) {
+        file_.open(cfg.file_path, std::ios::app);
+        if (!file_.is_open()) {
+            throw std::runtime_error("Failed to open log file: " + cfg.file_path);
+        }
+    }
+    if (async_mode_) {
+        start_worker();
+    }
 }
-
-// ── Convenience macros ────────────────────────────────────────────────────────
-
-/// Initialize with default settings (stdout, colors, sync).
-inline void log_init() { default_logger().initialize(); }
-
-/// Initialize with file output.
-inline void log_init_file(const std::string &path) { default_logger().initialize(true, path); }
-
-/// Initialize in async (non-blocking) mode.
-inline void log_init_async() { default_logger().initialize(false, "", true, true, true); }
-
-// Stream-style logging macros
-#define LOG default_logger().log()
-#define LOG_DEBUG default_logger().debug()
-#define LOG_INFO default_logger().info()
-#define LOG_SUCCESS default_logger().success()
-#define LOG_WARN default_logger().warning()
-#define LOG_WARNING default_logger().warning()
-#define LOG_ERROR default_logger().error()
-
-// Direct string logging functions (avoid constructing a log_stream)
-template <typename T>
-inline void LOG_S(const T &msg) {
-    default_logger().log(std::string(msg));
-}
-template <typename T>
-inline void LOG_DEBUG_S(const T &msg) {
-    default_logger().debug(std::string(msg));
-}
-template <typename T>
-inline void LOG_INFO_S(const T &msg) {
-    default_logger().info(std::string(msg));
-}
-template <typename T>
-inline void LOG_SUCCESS_S(const T &msg) {
-    default_logger().success(std::string(msg));
-}
-template <typename T>
-inline void LOG_WARN_S(const T &msg) {
-    default_logger().warning(std::string(msg));
-}
-template <typename T>
-inline void LOG_ERROR_S(const T &msg) {
-    default_logger().error(std::string(msg));
-}
-
-/// Stamp the current source location then continue the stream.
-#define LOG_HERE LOG_DEBUG << __FILE__ ":" << __LINE__ << " | "
-
-/// Mark unimplemented code — terminates via ERROR.
-#define LOG_TODO LOG_ERROR << __func__ << "() @ " << __FILE__ << ":" << __LINE__ << " — unimplemented"
-
-/// Mark unimplemented code — warns but continues.
-#define LOG_TODO_WARN LOG_WARN << __func__ << "() @ " << __FILE__ << ":" << __LINE__ << " — unimplemented"

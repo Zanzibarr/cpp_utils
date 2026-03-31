@@ -19,6 +19,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstring>
 #include <random>
 #include <thread>
@@ -30,6 +31,7 @@
 
 std::atomic<int> requests_handled{0};
 std::atomic<int> requests_failed{0};
+Logger logger;
 
 // ── Fake workload helpers ─────────────────────────────────────────────────────
 
@@ -51,81 +53,76 @@ static int fake_status() {
 // ── Worker thread ─────────────────────────────────────────────────────────────
 
 void worker(int worker_id, int num_requests) {
-    LOG_DEBUG << "Worker-" << worker_id << " starting, will handle " << num_requests << " requests";
+    logger.debug() << "Worker-" << worker_id << " starting, will handle " << num_requests << " requests";
 
     for (int i = 0; i < num_requests; ++i) {
         const std::string req_id = "W" + std::to_string(worker_id) + "-R" + std::to_string(i);
 
-        LOG_DEBUG << "[" << req_id << "] received GET /api/data";
+        logger.debug() << "[" << req_id << "] received GET /api/data";
         fake_io(5, 30);
 
         int status = fake_status();
         ++requests_handled;
 
         if (status == 200) {
-            LOG_INFO << "[" << req_id << "] → 200 OK";
+            logger.info() << "[" << req_id << "] → 200 OK";
         } else if (status == 301) {
-            LOG_INFO << "[" << req_id << "] → 301 Moved Permanently";
+            logger.info() << "[" << req_id << "] → 301 Moved Permanently";
         } else if (status == 404) {
-            LOG_WARN << "[" << req_id << "] → 404 Not Found";
+            logger.warning() << "[" << req_id << "] → 404 Not Found";
             ++requests_failed;
         } else {
-            LOG_WARN << "[" << req_id << "] → 500 Internal Server Error";
+            logger.warning() << "[" << req_id << "] → 500 Internal Server Error";
             ++requests_failed;
         }
     }
 
-    LOG_SUCCESS << "Worker-" << worker_id << " finished (" << num_requests << " requests processed)";
+    logger.success() << "Worker-" << worker_id << " finished (" << num_requests << " requests processed)";
 }
 
 // ── Metrics thread ────────────────────────────────────────────────────────────
 
-void metrics_reporter(std::atomic<bool> &running) {
+void metrics_reporter(std::atomic<bool>& running) {
     while (running.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
         int handled = requests_handled.load();
         int failed = requests_failed.load();
-        LOG_INFO << "[metrics] handled=" << handled << "  failed=" << failed << "  ok=" << (handled - failed);
+        logger.info() << "[metrics] handled=" << handled << "  failed=" << failed << "  ok=" << (handled - failed);
     }
 }
 
 // ── Startup / shutdown ────────────────────────────────────────────────────────
 
 void simulate_startup() {
-    LOG_INFO << "Loading configuration...";
+    logger.info() << "Loading configuration...";
     fake_io(10, 20);
 
-    LOG_INFO << "Connecting to database...";
+    logger.info() << "Connecting to database...";
     fake_io(20, 40);
 
-    LOG_SUCCESS << "Server ready on port 8080";
+    logger.success() << "Server ready on port 8080";
 }
 
 void simulate_config_reload() {
-    LOG_WARN << "SIGHUP received — reloading config";
+    logger.warning() << "SIGHUP received — reloading config";
     fake_io(5, 15);
 
     // Example: raise the minimum level at runtime (suppresses DEBUG in production)
-    default_logger().set_min_level(Logger::level::INFO);
-    LOG_INFO << "Log level raised to INFO (DEBUG suppressed from here)";
+    logger.set_min_level(Logger::level::INFO);
+    logger.info() << "Log level raised to INFO (DEBUG suppressed from here)";
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
     // ── 1. Initialize ─────────────────────────────────────────────────────────
 
     bool use_file = argc > 1 && std::strcmp(argv[1], "file") == 0;
     bool use_async = argc > 1 && std::strcmp(argv[1], "async") == 0;
 
-    if (use_file) {
-        default_logger().initialize(true, "server.log", false, true, false);
-        // (colors disabled for file output — the file already contains no escape codes)
-    } else if (use_async) {
-        default_logger().initialize(false, "", true, true, true);
-    } else {
-        log_init_async();
-    }
+    LoggerConfig conf = {.async = use_async, .file_path = (use_file ? "server.log" : ""), .min_level = LoggerLevel::DEBUG, .show_memory = true};
+
+    logger.set_config(conf);
 
     // ── 2. Startup ────────────────────────────────────────────────────────────
 
@@ -141,11 +138,13 @@ int main(int argc, char *argv[]) {
     constexpr int NUM_WORKERS = 4;
     constexpr int REQS_PER_WORKER = 6;
 
-    LOG_INFO << "Spawning " << NUM_WORKERS << " workers";
+    logger.info() << "Spawning " << NUM_WORKERS << " workers";
 
     std::vector<std::thread> workers;
     workers.reserve(NUM_WORKERS);
-    for (int i = 0; i < NUM_WORKERS; ++i) workers.emplace_back(worker, i, REQS_PER_WORKER);
+    for (int i = 0; i < NUM_WORKERS; ++i) {
+        workers.emplace_back(worker, i, REQS_PER_WORKER);
+    }
 
     // ── 5. Mid-run: simulate a config reload that changes the log level ───────
 
@@ -154,7 +153,7 @@ int main(int argc, char *argv[]) {
 
     // ── 6. Wait for workers ───────────────────────────────────────────────────
 
-    for (auto &w : workers) w.join();
+    for (auto& w : workers) w.join();
 
     // ── 7. Stop metrics ───────────────────────────────────────────────────────
 
@@ -167,12 +166,9 @@ int main(int argc, char *argv[]) {
     int failed = requests_failed.load();
     int success = total - failed;
 
-    default_logger().set_min_level(Logger::level::BASIC);  // restore for summary
+    logger.success() << "All workers done.  total=" << total << "  ok=" << success << "  failed=" << failed;
 
-    LOG_SUCCESS << "All workers done.  total=" << total << "  ok=" << success << "  failed=" << failed;
+    logger.log() << "Exiting";
 
-    LOG << "Exiting";
-
-    default_logger().flush();
     return 0;
 }
