@@ -3,7 +3,7 @@
 /**
  * @file timer.hxx
  * @brief High-resolution timer with per-name statistics accumulation.
- * @version 2.0.0
+ * @version 2.1.0
  *
  * @details
  * Core types:
@@ -63,9 +63,11 @@ using clock = std::chrono::steady_clock;
 using time_point = clock::time_point;
 
 // Constraint shared by all public Duration template parameters.
+// Accepts any std::chrono::duration specialization (not just the four named ones).
 template <typename D>
-concept ValidDuration = std::is_same_v<D, std::chrono::nanoseconds> || std::is_same_v<D, std::chrono::microseconds> ||
-                        std::is_same_v<D, std::chrono::milliseconds> || std::is_same_v<D, std::chrono::seconds>;
+concept ValidDuration =
+    std::is_same_v<D, std::chrono::duration<typename D::rep, typename D::period>> &&
+    std::ratio_less_equal<typename D::period, std::ratio<60>>::value;
 
 // Convert a raw nanosecond double to the requested Duration.
 template <ValidDuration D>
@@ -81,14 +83,17 @@ template <ValidDuration D>
 constexpr auto unit_name() -> const char* {
     if constexpr (std::is_same_v<D, std::chrono::nanoseconds>) {
         return "ns";
-    }
-    if constexpr (std::is_same_v<D, std::chrono::microseconds>) {
+    } else if constexpr (std::is_same_v<D, std::chrono::microseconds>) {
         return "us";
-    }
-    if constexpr (std::is_same_v<D, std::chrono::milliseconds>) {
+    } else if constexpr (std::is_same_v<D, std::chrono::milliseconds>) {
         return "ms";
+    } else if constexpr (std::is_same_v<D, std::chrono::seconds>) {
+        return "s";
+    } else if constexpr (std::is_same_v<D, std::chrono::minutes>) {
+        return "min";
+    } else {
+        return "?";
     }
-    return "s";
 }
 
 // ── Print helpers shared by both print_stats_report variants ─────────────────
@@ -548,7 +553,7 @@ class TimerRegistry {
      * For a live view that includes in-flight time, read timer.elapsed() directly.
      */
     template <timer_detail::ValidDuration D = std::chrono::milliseconds>
-    auto get_report() const -> std::vector<std::pair<std::string, double>> {
+    [[nodiscard]] auto get_totals_report() const -> std::vector<std::pair<std::string, double>> {
         std::vector<std::pair<std::string, double>> result;
         std::lock_guard lock(mutex_);
 
@@ -587,7 +592,7 @@ class TimerRegistry {
      * threads (including exited ones) via parallel Welford.
      */
     template <timer_detail::ValidDuration D = std::chrono::milliseconds>
-    auto get_stats_report() const -> std::vector<StatsRow> {
+    [[nodiscard]] auto get_stats_report() const -> std::vector<StatsRow> {
         std::vector<StatsRow> result;
         std::lock_guard lock(mutex_);
         for (const auto& name : known_names_order_) {
@@ -640,7 +645,7 @@ class TimerRegistry {
     }
 
     template <timer_detail::ValidDuration D = std::chrono::milliseconds>
-    auto get_thread_report() const -> std::vector<ThreadStatsRow> {
+    [[nodiscard]] auto get_thread_report() const -> std::vector<ThreadStatsRow> {
         std::vector<ThreadStatsRow> result;
         std::lock_guard lock(mutex_);
         for (const auto& row : thread_graveyard_) {
@@ -679,9 +684,9 @@ class TimerRegistry {
     }
 
     template <timer_detail::ValidDuration D = std::chrono::milliseconds>
-    auto report_to_str() const -> std::string {
+    [[nodiscard]] auto totals_report_to_str() const -> std::string {
         std::stringstream ost;
-        const auto rows = get_report<D>();
+        const auto rows = get_totals_report<D>();
         if (rows.empty()) {
             return ost.str();
         }
@@ -708,11 +713,19 @@ class TimerRegistry {
      *   render:     120.07 ms
      */
     template <timer_detail::ValidDuration D = std::chrono::milliseconds>
-    void print_report() const {
-        std::cout << report_to_str<D>();
+    void print_totals_report() const {
+        std::cout << totals_report_to_str<D>();
     }
 
-    auto stats_report_to_str() const -> std::string {
+    // ── Deprecated aliases (use the totals_* names above) ─────────────────
+    template <timer_detail::ValidDuration D = std::chrono::milliseconds>
+    [[nodiscard, deprecated("use get_totals_report()")]] auto get_report() const { return get_totals_report<D>(); }
+    template <timer_detail::ValidDuration D = std::chrono::milliseconds>
+    [[nodiscard, deprecated("use totals_report_to_str()")]] auto report_to_str() const { return totals_report_to_str<D>(); }
+    template <timer_detail::ValidDuration D = std::chrono::milliseconds>
+    [[deprecated("use print_totals_report()")]] void print_report() const { print_totals_report<D>(); }
+
+    [[nodiscard]] auto stats_report_to_str() const -> std::string {
         std::stringstream ost;
         const auto rows = get_stats_report<std::chrono::nanoseconds>();
         if (rows.empty()) {
@@ -755,7 +768,7 @@ class TimerRegistry {
      */
     void print_stats_report() const { std::cout << stats_report_to_str(); }
 
-    auto thread_report_to_str() const -> std::string {
+    [[nodiscard]] auto thread_report_to_str() const -> std::string {
         std::stringstream ost;
 
         const auto rows = get_thread_report<std::chrono::nanoseconds>();
@@ -970,4 +983,4 @@ inline auto global_timers() -> TimerRegistry& {
     return inst;
 }
 
-#define TIMERS global_timers()
+#define TIMER_REG global_timers()

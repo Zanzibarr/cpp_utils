@@ -45,7 +45,7 @@ static void random_sleep(int lo_ms, int hi_ms) {
 void demo_basic_timers() {
     section("1 · Basic Timers (inherited from TimerRegistry)");
 
-    auto& reg = STATS;
+    auto& reg = STATS_REG;
 
     // ── 1a. Manual start / stop ───────────────────────────────────────────
     subsection("1a. start<n> / stop<n> / elapsed<n>");
@@ -127,7 +127,7 @@ void demo_basic_timers() {
 void demo_counters() {
     section("2 · Counters");
 
-    auto& reg = STATS;
+    auto& reg = STATS_REG;
 
     // ── 2a. Basic inc / dec ───────────────────────────────────────────────
     subsection("2a. counter_inc<n> and counter_dec<n>");
@@ -209,7 +209,7 @@ void demo_counters() {
 void demo_gauges() {
     section("3 · Gauges (fractional statistics)");
 
-    auto& reg = STATS;
+    auto& reg = STATS_REG;
     std::mt19937 rng{42};
 
     // ── 3a. Basic recording ───────────────────────────────────────────────
@@ -266,7 +266,7 @@ void demo_gauges() {
 void demo_histograms() {
     section("4 · Histograms (bucketed distributions)");
 
-    auto& reg = STATS;
+    auto& reg = STATS_REG;
     std::mt19937 rng{99};
 
     // ── 4a. Uniform distribution ──────────────────────────────────────────
@@ -322,7 +322,7 @@ void demo_histograms() {
 void demo_multithreaded() {
     section("5 · Multi-threaded scenario — simulated web server");
 
-    auto& reg = STATS;
+    auto& reg = STATS_REG;
 
     reg.histogram_create<"server.response_ms">(0.0, 300.0, 12);
 
@@ -396,7 +396,7 @@ void demo_multithreaded() {
 void demo_series() {
     section("6 · Series — tracking value evolution over time");
 
-    auto& reg = STATS;
+    auto& reg = STATS_REG;
 
     // ── Simulate a MIP solver recording incumbent + lower bounds ─────────────
     subsection("MIP-solver incumbent & lower-bound progression (single thread)");
@@ -470,7 +470,7 @@ void demo_series() {
 
 void demo_all_reports() {
     section("7 · print_all_reports() — everything in one call");
-    STATS.print_all_reports();
+    STATS_REG.print_all_reports();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

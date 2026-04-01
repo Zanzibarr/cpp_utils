@@ -473,7 +473,7 @@ TEST_CASE("global_timers returns the same instance on every call") {
     expect(&a).to_equal(&b);
 }
 
-TEST_CASE("TIMERS macro refers to the same instance as global_timers()") { expect(&TIMERS).to_equal(&global_timers()); }
+TEST_CASE("TIMER_REG macro refers to the same instance as global_timers()") { expect(&TIMER_REG).to_equal(&global_timers()); }
 
 TEST_CASE("global_timers instance is distinct from a local TimerRegistry") {
     TimerRegistry local;
@@ -718,41 +718,41 @@ TEST_CASE("stats count matches call count after many iterations") {
     expect(reg.stats<"many_calls">().count).to_equal(static_cast<std::size_t>(N));
 }
 
-TEST_CASE("get_report returns entry for used timer") {
+TEST_CASE("get_totals_report returns entry for used timer") {
     TimerRegistry reg;
     reg.start<"rep_simple">();
     reg.stop<"rep_simple">();
-    auto rows = reg.get_report();
+    auto rows = reg.get_totals_report();
     bool found = false;
     for (const auto& [name, val] : rows)
         if (name == "rep_simple") found = true;
     expect(found).to_be_true();
 }
 
-TEST_CASE("get_report elapsed value is positive after real work") {
+TEST_CASE("get_totals_report elapsed value is positive after real work") {
     TimerRegistry reg;
     reg.start<"rep_pos">();
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
     reg.stop<"rep_pos">();
-    auto rows = reg.get_report();
+    auto rows = reg.get_totals_report();
     double val = 0.0;
     for (const auto& [name, v] : rows)
         if (name == "rep_pos") val = v;
     expect(val > 0.0).to_be_true();
 }
 
-TEST_CASE("get_report is empty when no timers have been started") {
+TEST_CASE("get_totals_report is empty when no timers have been started") {
     TimerRegistry reg;
-    expect(reg.get_report().empty()).to_be_true();
+    expect(reg.get_totals_report().empty()).to_be_true();
 }
 
-TEST_CASE("get_report does not include in-flight time from running timer") {
+TEST_CASE("get_totals_report does not include in-flight time from running timer") {
     TimerRegistry reg;
     // Record one completed lap
     reg.start<"inflight_excl">();
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
     reg.stop<"inflight_excl">();
-    auto rows_stopped = reg.get_report();
+    auto rows_stopped = reg.get_totals_report();
     double stopped_val = 0.0;
     for (const auto& [name, v] : rows_stopped)
         if (name == "inflight_excl") stopped_val = v;
@@ -760,7 +760,7 @@ TEST_CASE("get_report does not include in-flight time from running timer") {
     // Start again but don't stop — in-flight time should not appear in snapshot
     reg.start<"inflight_excl">();
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    auto rows_running = reg.get_report();
+    auto rows_running = reg.get_totals_report();
     double running_val = 0.0;
     for (const auto& [name, v] : rows_running)
         if (name == "inflight_excl") running_val = v;
@@ -1191,12 +1191,11 @@ TEST_CASE("get_counter_report is empty when no counters are registered") {
     expect(reg.get_counter_report().empty()).to_be_true();
 }
 
-TEST_CASE("counter_get for name never modified returns zero without registering") {
+TEST_CASE("counter_get for name never modified returns zero and registers it") {
     StatsRegistry reg;
-    // counter_get should not register
     int64_t val = reg.counter_get<"ghost_counter">();
     expect(val).to_equal(static_cast<int64_t>(0));
-    expect(reg.get_counter_report().empty()).to_be_true();
+    expect(reg.get_counter_report().empty()).to_be_false();
 }
 
 TEST_CASE("counter large increment and decrement does not overflow int64") {
@@ -1496,10 +1495,16 @@ TEST_CASE("histogram_create succeeds for valid parameters") {
     expect_no_throw(reg.histogram_create<"h_ok">(0.0, 10.0, 5));
 }
 
-TEST_CASE("histogram_create throws for duplicate name") {
+TEST_CASE("histogram_create with same bounds is a no-op") {
     StatsRegistry reg;
     reg.histogram_create<"h_dup">(0.0, 10.0);
-    expect_throws(std::runtime_error, reg.histogram_create<"h_dup">(0.0, 10.0));
+    expect_no_throw(reg.histogram_create<"h_dup">(0.0, 10.0));
+}
+
+TEST_CASE("histogram_create throws for duplicate name with different bounds") {
+    StatsRegistry reg;
+    reg.histogram_create<"h_dup2">(0.0, 10.0);
+    expect_throws(std::logic_error, reg.histogram_create<"h_dup2">(0.0, 20.0));
 }
 
 TEST_CASE("histogram_create throws when low >= high") {
@@ -1720,9 +1725,14 @@ TEST_CASE("histogram with many buckets and many records is consistent") {
     for (const auto& b : row.buckets) expect(b.count).to_equal(static_cast<std::size_t>(10));
 }
 
-TEST_CASE("histogram_record before histogram_create throws logic_error") {
+TEST_CASE("histogram_record before histogram_create succeeds via lazy-init") {
     StatsRegistry reg;
-    expect_throws(std::logic_error, reg.histogram_record<"uncreated_hist2">(1.0));
+    expect_no_throw(reg.histogram_record<"uncreated_hist2">(0.5));
+    auto rows = reg.get_histogram_report();
+    bool found = false;
+    for (const auto& row : rows)
+        if (row.name == "uncreated_hist2") found = true;
+    expect(found).to_be_true();
 }
 
 TEST_CASE("histogram name appears in report even with only underflow and overflow") {
@@ -1749,7 +1759,7 @@ TEST_CASE("global_stats returns the same instance on every call") {
     expect(&a).to_equal(&b);
 }
 
-TEST_CASE("STATS macro refers to the same instance as global_stats()") { expect(&STATS).to_equal(&global_stats()); }
+TEST_CASE("STATS_REG macro refers to the same instance as global_stats()") { expect(&STATS_REG).to_equal(&global_stats()); }
 
 TEST_CASE("global_stats instance is distinct from a local StatsRegistry") {
     StatsRegistry local;
@@ -1906,14 +1916,13 @@ TEST_CASE("using same name for different primitive types throws (histogram first
     expect_throws(std::logic_error, reg.gauge_record<"conflict_name3">(1.0));
 }
 
-TEST_CASE("histogram_record throws if create was not called") {
+TEST_CASE("histogram_record without prior histogram_create succeeds via lazy-init") {
     StatsRegistry reg;
-    expect_throws(std::logic_error, reg.histogram_record<"uncreated_hist">(5.0));
+    expect_no_throw(reg.histogram_record<"uncreated_hist">(0.5));
 }
 
-TEST_CASE("counter only read via counter_get does not appear in reports") {
+TEST_CASE("counter_get auto-registers the counter for reports") {
     StatsRegistry reg;
-    // get doesn't register the name for reporting
     (void)reg.counter_get<"unreported_counter">();
     auto rows = reg.get_counter_report();
     bool found = false;
@@ -1922,7 +1931,7 @@ TEST_CASE("counter only read via counter_get does not appear in reports") {
             found = true;
         }
     }
-    expect(found).to_be_false();
+    expect(found).to_be_true();
 }
 
 TEST_CASE("counter set to zero appears in reports") {
@@ -1932,10 +1941,9 @@ TEST_CASE("counter set to zero appears in reports") {
     expect(row.value).to_equal(static_cast<int64_t>(0));
 }
 
-TEST_CASE("concurrent histogram_create is safe and throws on duplicates") {
+TEST_CASE("concurrent histogram_create with same bounds all succeed") {
     StatsRegistry reg;
     std::atomic<int> success_count = 0;
-    std::atomic<int> throw_count = 0;
     constexpr int N_THREADS = 4;
     std::barrier sync_point(N_THREADS);
 
@@ -1944,8 +1952,7 @@ TEST_CASE("concurrent histogram_create is safe and throws on duplicates") {
         try {
             reg.histogram_create<"concurrent_hist">(0.0, 10.0, 10);
             success_count++;
-        } catch (const std::runtime_error&) {
-            throw_count++;
+        } catch (...) {
         }
     };
 
@@ -1953,12 +1960,11 @@ TEST_CASE("concurrent histogram_create is safe and throws on duplicates") {
     for (int i = 0; i < N_THREADS; ++i) {
         threads.emplace_back(task);
     }
-    for (auto& t : threads) {
-        t.join();
+    for (auto& thr : threads) {
+        thr.join();
     }
 
-    expect(success_count.load()).to_equal(1);
-    expect(throw_count.load()).to_equal(N_THREADS - 1);
+    expect(success_count.load()).to_equal(N_THREADS);
 }
 
 TEST_CASE("histogram correctly buckets value just below upper bound") {
@@ -2022,12 +2028,12 @@ TEST_CASE("print_all_reports does not crash when all primitives are populated") 
     expect_no_throw(reg.print_all_reports());
 }
 
-TEST_CASE("print_report (simple) does not crash with used timer") {
+TEST_CASE("print_totals_report (simple) does not crash with used timer") {
     TimerRegistry reg;
     reg.start<"print_rep">();
     reg.stop<"print_rep">();
     SuppressStdout suppress;
-    expect_no_throw(reg.print_report());
+    expect_no_throw(reg.print_totals_report());
 }
 
 TEST_CASE("print_thread_report does not crash") {
