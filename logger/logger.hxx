@@ -3,7 +3,7 @@
 /**
  * @file logger.hxx
  * @brief Thread-safe logger with synchronous and asynchronous output modes.
- * @version 2.0.0
+ * @version 2.1.0
  *
  * @details
  * `Logger` supports two operating modes selected at construction:
@@ -12,7 +12,7 @@
  *   - **Async** — log records are pushed onto a lock-free queue and drained
  *     by a dedicated background thread, minimising latency on the hot path.
  *
- * Six severity levels: `BASIC`, `DEBUG`, `INFO`, `SUCCESS`, `WARNING`, `ERROR`.
+ * Seven severity levels: `DEBUG`, `INFO`, `WARNING`, `RAW`, `SUCCESS`, `ERROR`, `FATAL`.
  *
  * Output to stdout/stderr and to a file are independently controlled —
  * both can be active simultaneously.  ANSI colors apply only to console output.
@@ -34,6 +34,7 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <queue>
 #include <sstream>
 #include <stdexcept>
@@ -59,12 +60,12 @@
  * is.  The filter rule is simply `level >= min_level`:
  *
  *   min_level = DEBUG   → everything printed
- *   min_level = BASIC   → BASIC, SUCCESS, ERROR  (default)
- *   min_level = ERROR   → only ERROR
+ *   min_level = RAW     → RAW, SUCCESS, ERROR, FATAL  (default)
+ *   min_level = ERROR   → only ERROR and FATAL
  *
- * Ordering:  DEBUG(0) < INFO(1) < WARNING(2) < BASIC(3) < SUCCESS(4) < ERROR(5)
+ * Ordering:  DEBUG(0) < INFO(1) < WARNING(2) < RAW(3) < SUCCESS(4) < ERROR(5) < FATAL(6)
  */
-enum class LoggerLevel : int { DEBUG = 0, INFO = 1, WARNING = 2, BASIC = 3, SUCCESS = 4, ERROR = 5 };
+enum class LoggerLevel : int { DEBUG = 0, INFO = 1, WARNING = 2, RAW = 3, SUCCESS = 4, ERROR = 5, FATAL = 6 };
 
 // ── LoggerConfig ─────────────────────────────────────────────────────────────
 
@@ -77,13 +78,13 @@ enum class LoggerLevel : int { DEBUG = 0, INFO = 1, WARNING = 2, BASIC = 3, SUCC
  * @endcode
  */
 struct LoggerConfig {
-    bool to_stdout = true;                       ///< Write to stdout/stderr.
-    bool use_colors = true;                      ///< Emit ANSI escape codes on console.
-    bool show_thread = true;                     ///< Prefix each line with a short thread ID.
-    bool async = false;                          ///< Dispatch writes to a background thread.
-    std::string file_path;                       ///< Non-empty → open this file for plain-text output.
-    LoggerLevel min_level = LoggerLevel::BASIC;  ///< Discard messages below this level.
-    bool show_memory = false;                    ///< Prefix each line with current RSS in KB.
+    bool to_stdout = true;                     ///< Write to stdout/stderr.
+    bool use_colors = true;                    ///< Emit ANSI escape codes on console.
+    bool show_thread = true;                   ///< Prefix each line with a short thread ID.
+    bool async = false;                        ///< Dispatch writes to a background thread.
+    std::string file_path;                     ///< Non-empty → open this file for plain-text output.
+    LoggerLevel min_level = LoggerLevel::RAW;  ///< Discard messages below this level.
+    bool show_memory = false;                  ///< Prefix each line with current RSS in KB.
 
     auto with_stdout(bool enabled = true) -> auto& {
         to_stdout = enabled;
@@ -149,7 +150,11 @@ class Logger {
     class log_stream {
        public:
         log_stream(Logger* logger_ptr, level lvl, bool exit_on_error = false)
-            : lg_(logger_ptr), level_(lvl), exit_on_error_(exit_on_error), active_(lvl >= logger_ptr->min_level_.load(std::memory_order_relaxed)) {}
+            : lg_(logger_ptr), level_(lvl), exit_on_error_(exit_on_error), active_(lvl >= logger_ptr->min_level_.load(std::memory_order_relaxed)) {
+            if (active_) {
+                buf_.emplace();  // eager init — eliminates branch on every operator<<
+            }
+        }
 
         log_stream(log_stream&& other) noexcept
             : lg_(other.lg_), level_(other.level_), buf_(std::move(other.buf_)), exit_on_error_(other.exit_on_error_), active_(other.active_) {
@@ -163,24 +168,21 @@ class Logger {
         template <typename T>
         auto operator<<(const T& val) -> log_stream& {
             if (active_) {
-                if (!buf_) {
-                    buf_.emplace();  // lazy init
-                }
                 *buf_ << val;
             }
             return *this;
         }
 
         ~log_stream() {
-            if (moved_ || !active_ || !buf_) {
+            if (moved_ || !active_) {
                 return;
             }
             std::string msg = buf_->str();
             if (!msg.empty()) {
                 lg_->emit(msg, level_);
             }
-            if (exit_on_error_ && level_ == level::ERROR) {
-                lg_->flush();  // drain queue before exiting so the error message is printed
+            if (exit_on_error_ && level_ == level::FATAL) {
+                lg_->flush();  // drain queue before exiting so the fatal message is printed
                 _Exit(EXIT_FAILURE);
             }
         }
@@ -215,19 +217,16 @@ class Logger {
 
     // ── Runtime controls ──────────────────────────────────────────────────────
 
-    /// Set configuration as a whole
+    /// Reconfigure all output options at runtime.
+    /// Note: async mode is constructor-only and is not changed by this method.
     void set_config(config cfg) {
-        to_stdout_ = cfg.to_stdout;
-        use_colors_ = cfg.use_colors;
-        show_thread_ = cfg.show_thread;
-        show_memory_ = cfg.show_memory;
-        async_mode_ = cfg.async;
+        set_stdout(cfg.to_stdout);
+        set_colors(cfg.use_colors);
+        set_thread(cfg.show_thread);
+        set_memory(cfg.show_memory);
+        set_min_level(cfg.min_level);
         if (!cfg.file_path.empty()) {
             open_file(cfg.file_path);
-        }
-        min_level_ = cfg.min_level;
-        if (async_mode_ && !worker_running_) {
-            start_worker();
         }
     }
 
@@ -297,26 +296,38 @@ class Logger {
 
     // ── String overloads ──────────────────────────────────────────────────────
 
-    void log(const std::string_view& msg) { emit(msg, level::BASIC); }
-    void debug(const std::string_view& msg) { emit(msg, level::DEBUG); }
-    void info(const std::string_view& msg) { emit(msg, level::INFO); }
-    void success(const std::string_view& msg) { emit(msg, level::SUCCESS); }
-    void warning(const std::string_view& msg) { emit(msg, level::WARNING); }
-
-    [[noreturn]] void error(const std::string& msg) {
-        emit(msg, level::ERROR);
-        flush();  // drain queue before exiting so the error message is printed
+    void log(std::string_view msg) { emit(msg, level::RAW); }
+    void info(std::string_view msg) { emit(msg, level::INFO); }
+    void success(std::string_view msg) { emit(msg, level::SUCCESS); }
+    void warning(std::string_view msg) { emit(msg, level::WARNING); }
+    void debug(std::string_view msg) { emit(msg, level::DEBUG); }
+    void error(std::string_view msg) { emit(msg, level::ERROR); }
+    [[noreturn]] void fatal(std::string_view msg) {
+        emit(msg, level::FATAL);
+        flush();
         _Exit(EXIT_FAILURE);
     }
 
     // ── Stream-style factory methods ──────────────────────────────────────────
 
-    auto log() -> log_stream { return {this, level::BASIC}; }
-    auto debug() -> log_stream { return {this, level::DEBUG}; }
-    auto info() -> log_stream { return {this, level::INFO}; }
-    auto success() -> log_stream { return {this, level::SUCCESS}; }
-    auto warning() -> log_stream { return {this, level::WARNING}; }
-    auto error() -> log_stream { return {this, level::ERROR, true}; }
+    [[nodiscard]] auto log() -> log_stream { return {this, level::RAW}; }
+    [[nodiscard]] auto info() -> log_stream { return {this, level::INFO}; }
+    [[nodiscard]] auto success() -> log_stream { return {this, level::SUCCESS}; }
+    [[nodiscard]] auto warning() -> log_stream { return {this, level::WARNING}; }
+    [[nodiscard]] auto debug() -> log_stream { return {this, level::DEBUG}; }
+    [[nodiscard]] auto error() -> log_stream { return {this, level::ERROR}; }
+    [[nodiscard]] auto fatal() -> log_stream { return {this, level::FATAL, true}; }
+
+    /// Select a level via subscript: `lg[INFO] << "msg"`.
+    [[nodiscard]] auto operator[](level lvl) -> log_stream { return {this, lvl, lvl == level::FATAL}; }
+
+    /// Stream directly at RAW level: `lg << "msg"`.
+    template <typename T>
+    auto operator<<(T&& val) -> log_stream {
+        log_stream stream{this, level::RAW};
+        stream << std::forward<T>(val);
+        return stream;
+    }
 
     // ── Destructor ────────────────────────────────────────────────────────────
 
@@ -343,6 +354,7 @@ class Logger {
         std::string thread_id;  // captured at emit() time
         long memory_kb;         // captured at emit() time; -1 when not requested
     };
+
     // ── Level metadata ────────────────────────────────────────────────────────
 
     struct level_meta {
@@ -353,7 +365,7 @@ class Logger {
 
     static auto meta_of(level lvl) noexcept -> level_meta {
         switch (lvl) {
-            case level::BASIC:
+            case level::RAW:
                 return {.label = "       ", .color = ansi::codes::white, .use_err = false};
             case level::DEBUG:
                 return {.label = " DEBUG ", .color = ansi::codes::blue, .use_err = false};
@@ -365,6 +377,8 @@ class Logger {
                 return {.label = "WARNING", .color = ansi::codes::bright_yellow, .use_err = true};
             case level::ERROR:
                 return {.label = " ERROR ", .color = ansi::codes::bright_red, .use_err = true};
+            case level::FATAL:
+                return {.label = " FATAL ", .color = ansi::codes::bright_magenta, .use_err = true};
         }
         return {.label = "       ", .color = ansi::codes::white, .use_err = false};
     }
@@ -392,10 +406,29 @@ class Logger {
     // ── Memory formatting ─────────────────────────────────────────────────────
 
     static auto format_memory(long kb) -> std::string {
-        // "[NNNNNNN KB] " — 7-digit right-aligned field, covers up to ~9.5 GB
+        // Auto-scale unit so the 7-digit field never overflows:
+        //   < 1,000,000 KB  (~1 TB) → show KB
+        //   < 1,000,000 MB  (~1 PB) → show MB
+        //   else             (≥ 1 PB) → show GB
+        // "[NNNNNNN XB] " — always 13 chars regardless of scale.
+        constexpr long KB_PER_MB = 1'000L;
+        constexpr long KB_PER_GB = 1'000'000L;
+        constexpr long KB_PER_TB = 1'000'000'000L;
+
+        long value = kb;
+        char unit0 = 'K';
+        char unit1 = 'B';
+        if (kb >= KB_PER_TB) {
+            value = kb / KB_PER_GB;
+            unit0 = 'G';
+        } else if (kb >= KB_PER_GB) {
+            value = kb / KB_PER_MB;
+            unit0 = 'M';
+        }
+
         char num[8] = {' ', ' ', ' ', ' ', ' ', ' ', '0', '\0'};
-        if (kb > 0) {
-            long v = kb;
+        if (value > 0) {
+            long v = value;
             for (int i = 6; i >= 0 && v > 0; --i, v /= 10) {
                 num[i] = static_cast<char>('0' + (v % 10));
             }
@@ -410,8 +443,8 @@ class Logger {
         buf[6] = num[5];
         buf[7] = num[6];
         buf[8] = ' ';
-        buf[9] = 'K';
-        buf[10] = 'B';
+        buf[9] = unit0;
+        buf[10] = unit1;
         buf[11] = ']';
         buf[12] = ' ';
         buf[13] = '\0';
@@ -450,12 +483,15 @@ class Logger {
     }
 
     // ── Thread ID ─────────────────────────────────────────────────────────────
+
     static auto current_thread_tag() -> const std::string& {
         thread_local std::string tag = "[T:" + []() -> std::string {
             std::ostringstream oss;
             oss << std::this_thread::get_id();
             std::string str = oss.str();
-            if (str.size() > 4) str = str.substr(str.size() - 4);
+            if (str.size() > 4) {
+                str = str.substr(str.size() - 4);
+            }
             return str;
         }() + "] ";
         return tag;
@@ -465,23 +501,61 @@ class Logger {
 
     void write_record(const record& rec) {
         const auto [label, color, use_err] = meta_of(rec.lvl);
+        const bool has_prefix = rec.lvl != level::RAW;
+        const bool need_plain = file_.is_open() || !to_stdout_ || !use_colors_ || !has_prefix;
+        const bool need_colored = to_stdout_ && use_colors_ && has_prefix;
 
+        // Compute once, shared between both paths (12 / 13 chars — SSO, no heap alloc).
+        const std::string time_str = has_prefix ? format_time(rec.elapsed) : std::string{};
+        const std::string mem_str = (has_prefix && rec.memory_kb >= 0) ? format_memory(rec.memory_kb) : std::string{};
+
+        // Plain line (for file and/or uncolored console).
         thread_local std::string plain;
-        plain.clear();
-
-        if (rec.lvl != level::BASIC) {
-            plain += '[';
-            plain += format_time(rec.elapsed);
-            plain += "] ";
-            if (rec.memory_kb >= 0) plain += format_memory(rec.memory_kb);
-            if (show_thread_) plain += current_thread_tag();  // ← cached, no alloc
-            plain += '[';
-            plain += label;
-            plain += "] ";
+        if (need_plain) {
+            plain.clear();
+            if (has_prefix) {
+                plain += '[';
+                plain += time_str;
+                plain += "] ";
+                plain += mem_str;
+                if (show_thread_) {
+                    plain += rec.thread_id;
+                }
+                plain += '[';
+                plain += label;
+                plain += "] ";
+            }
+            plain += rec.message;
         }
 
-        const std::size_t prefix_end = plain.size();
-        plain += rec.message;
+        // Colored line — built into a second thread_local buffer, written in
+        // one ostr.write() call to avoid per-segment virtual-dispatch overhead.
+        thread_local std::string colored;
+        if (need_colored) {
+            colored.clear();
+            colored += ansi::codes::cyan;
+            colored += '[';
+            colored += time_str;
+            colored += "] ";
+            colored += ansi::codes::reset;
+            if (!mem_str.empty()) {
+                colored += ansi::codes::green;
+                colored += mem_str;
+                colored += ansi::codes::reset;
+            }
+            if (show_thread_) {
+                colored += ansi::codes::magenta;
+                colored += rec.thread_id;
+                colored += ansi::codes::reset;
+            }
+            colored += color;
+            colored += '[';
+            colored += label;
+            colored += "] ";
+            colored += ansi::codes::reset;
+            colored += rec.message;
+            colored += '\n';
+        }
 
         if (file_.is_open()) {
             file_ << plain << '\n';
@@ -490,12 +564,8 @@ class Logger {
 
         if (to_stdout_) {
             std::ostream& ostr = use_err ? std::cerr : std::cout;
-            if (use_colors_ && rec.lvl != level::BASIC) {
-                ostr << ansi::codes::cyan;
-                ostr.write(plain.data(), prefix_end);
-                ostr << ansi::codes::reset << color;
-                ostr.write(plain.data() + prefix_end, plain.size() - prefix_end);
-                ostr << ansi::codes::reset << '\n';
+            if (need_colored) {
+                ostr.write(colored.data(), static_cast<std::streamsize>(colored.size()));
             } else {
                 ostr << plain << '\n';
             }
@@ -573,7 +643,7 @@ class Logger {
     bool show_thread_ = true;
     bool show_memory_ = false;
     bool async_mode_ = false;
-    std::atomic<level> min_level_{level::BASIC};
+    std::atomic<level> min_level_{level::RAW};
 
     std::ofstream file_;
 

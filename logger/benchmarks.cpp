@@ -15,6 +15,8 @@
 
 #include "logger.hxx"
 
+using enum LoggerLevel;
+
 // ── /dev/null sink ────────────────────────────────────────────────────────────
 
 struct NullBuf : std::streambuf {
@@ -41,7 +43,7 @@ auto main() -> int {
     NullBuf null_buf;
 
     Logger log;
-    log.set_min_level(Logger::level::DEBUG);
+    log.set_min_level(DEBUG);
 
     // ── 1. Baseline: loop with no logging ─────────────────────────────────────
     volatile int sink = 0;  // prevent the loop being optimised away
@@ -80,7 +82,7 @@ auto main() -> int {
         t0 = now_ms();
         for (int i = 0; i < ITERATIONS; ++i) {
             sink += i;
-            log.info() << MSG;
+            log[INFO] << MSG;
         }
         double sync_stream_ms = now_ms() - t0;
 
@@ -94,7 +96,7 @@ auto main() -> int {
 
     // ── 4. Filtered logger (min=ERROR, INFO is silenced) ─────────────────────
     {
-        log.set_min_level(Logger::level::ERROR);
+        log.set_min_level(ERROR);
 
         t0 = now_ms();
         for (int i = 0; i < ITERATIONS; ++i) {
@@ -103,7 +105,7 @@ auto main() -> int {
         }
         double filtered_string_ms = now_ms() - t0;
 
-        log.set_min_level(Logger::level::BASIC);  // restore
+        log.set_min_level(RAW);  // restore
 
         std::cout << "[filter/ string ] total: " << filtered_string_ms << " ms"
                   << "   overhead vs baseline: " << (filtered_string_ms - baseline_ms) << " ms"
@@ -112,16 +114,16 @@ auto main() -> int {
 
     // ── 5. Filtered stream API ────────────────────────────────────────────────
     {
-        log.set_min_level(Logger::level::ERROR);
+        log.set_min_level(ERROR);
 
         t0 = now_ms();
         for (int i = 0; i < ITERATIONS; ++i) {
             sink += i;
-            log.info() << MSG;
+            log[INFO] << MSG;
         }
         double filtered_stream_ms = now_ms() - t0;
 
-        log.set_min_level(Logger::level::BASIC);
+        log.set_min_level(RAW);
 
         std::cout << "[filter/ stream ] total: " << filtered_stream_ms << " ms"
                   << "   overhead vs baseline: " << (filtered_stream_ms - baseline_ms) << " ms"

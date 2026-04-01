@@ -33,6 +33,8 @@ std::atomic<int> requests_handled{0};
 std::atomic<int> requests_failed{0};
 Logger logger;
 
+using enum LoggerLevel;
+
 // ── Fake workload helpers ─────────────────────────────────────────────────────
 
 /// Simulates variable-latency I/O (1–50 ms).
@@ -53,31 +55,31 @@ static int fake_status() {
 // ── Worker thread ─────────────────────────────────────────────────────────────
 
 void worker(int worker_id, int num_requests) {
-    logger.debug() << "Worker-" << worker_id << " starting, will handle " << num_requests << " requests";
+    logger[DEBUG] << "Worker-" << worker_id << " starting, will handle " << num_requests << " requests";
 
     for (int i = 0; i < num_requests; ++i) {
         const std::string req_id = "W" + std::to_string(worker_id) + "-R" + std::to_string(i);
 
-        logger.debug() << "[" << req_id << "] received GET /api/data";
+        logger[DEBUG] << "[" << req_id << "] received GET /api/data";
         fake_io(5, 30);
 
         int status = fake_status();
         ++requests_handled;
 
         if (status == 200) {
-            logger.info() << "[" << req_id << "] → 200 OK";
+            logger[INFO] << "[" << req_id << "] → 200 OK";
         } else if (status == 301) {
-            logger.info() << "[" << req_id << "] → 301 Moved Permanently";
+            logger[INFO] << "[" << req_id << "] → 301 Moved Permanently";
         } else if (status == 404) {
-            logger.warning() << "[" << req_id << "] → 404 Not Found";
+            logger[WARNING] << "[" << req_id << "] → 404 Not Found";
             ++requests_failed;
         } else {
-            logger.warning() << "[" << req_id << "] → 500 Internal Server Error";
+            logger[WARNING] << "[" << req_id << "] → 500 Internal Server Error";
             ++requests_failed;
         }
     }
 
-    logger.success() << "Worker-" << worker_id << " finished (" << num_requests << " requests processed)";
+    logger[SUCCESS] << "Worker-" << worker_id << " finished (" << num_requests << " requests processed)";
 }
 
 // ── Metrics thread ────────────────────────────────────────────────────────────
@@ -87,29 +89,29 @@ void metrics_reporter(std::atomic<bool>& running) {
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
         int handled = requests_handled.load();
         int failed = requests_failed.load();
-        logger.info() << "[metrics] handled=" << handled << "  failed=" << failed << "  ok=" << (handled - failed);
+        logger[INFO] << "[metrics] handled=" << handled << "  failed=" << failed << "  ok=" << (handled - failed);
     }
 }
 
 // ── Startup / shutdown ────────────────────────────────────────────────────────
 
 void simulate_startup() {
-    logger.info() << "Loading configuration...";
+    logger[INFO] << "Loading configuration...";
     fake_io(10, 20);
 
-    logger.info() << "Connecting to database...";
+    logger[INFO] << "Connecting to database...";
     fake_io(20, 40);
 
-    logger.success() << "Server ready on port 8080";
+    logger[SUCCESS] << "Server ready on port 8080";
 }
 
 void simulate_config_reload() {
-    logger.warning() << "SIGHUP received — reloading config";
+    logger[WARNING] << "SIGHUP received — reloading config";
     fake_io(5, 15);
 
     // Example: raise the minimum level at runtime (suppresses DEBUG in production)
     logger.set_min_level(Logger::level::INFO);
-    logger.info() << "Log level raised to INFO (DEBUG suppressed from here)";
+    logger[INFO] << "Log level raised to INFO (DEBUG suppressed from here)";
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
@@ -120,7 +122,7 @@ int main(int argc, char* argv[]) {
     bool use_file = argc > 1 && std::strcmp(argv[1], "file") == 0;
     bool use_async = argc > 1 && std::strcmp(argv[1], "async") == 0;
 
-    LoggerConfig conf = {.async = use_async, .file_path = (use_file ? "server.log" : ""), .min_level = LoggerLevel::DEBUG, .show_memory = true};
+    LoggerConfig conf = {.async = use_async, .file_path = (use_file ? "server.log" : ""), .min_level = DEBUG, .show_memory = true};
 
     logger.set_config(conf);
 
@@ -138,7 +140,7 @@ int main(int argc, char* argv[]) {
     constexpr int NUM_WORKERS = 4;
     constexpr int REQS_PER_WORKER = 6;
 
-    logger.info() << "Spawning " << NUM_WORKERS << " workers";
+    logger[INFO] << "Spawning " << NUM_WORKERS << " workers";
 
     std::vector<std::thread> workers;
     workers.reserve(NUM_WORKERS);
@@ -166,9 +168,9 @@ int main(int argc, char* argv[]) {
     int failed = requests_failed.load();
     int success = total - failed;
 
-    logger.success() << "All workers done.  total=" << total << "  ok=" << success << "  failed=" << failed;
+    logger[SUCCESS] << "All workers done.  total=" << total << "  ok=" << success << "  failed=" << failed;
 
-    logger.log() << "Exiting";
+    logger << "Exiting";
 
     return 0;
 }
