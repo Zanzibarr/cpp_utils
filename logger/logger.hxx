@@ -660,13 +660,13 @@ class Logger {
 //    are fully visible at the point where cfg = {} is evaluated) ───────────────
 
 inline Logger::Logger(config cfg, std::chrono::steady_clock::time_point start)
-    : start_(start),
-      to_stdout_(cfg.to_stdout),
+    : to_stdout_(cfg.to_stdout),
       use_colors_(cfg.use_colors),
       show_thread_(cfg.show_thread),
       show_memory_(cfg.show_memory),
       async_mode_(cfg.async),
-      min_level_(cfg.min_level) {
+      min_level_(cfg.min_level),
+      start_(start) {
     if (!cfg.file_path.empty()) {
         file_.open(cfg.file_path, std::ios::app);
         if (!file_.is_open()) {
