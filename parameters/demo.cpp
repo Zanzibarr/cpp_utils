@@ -46,16 +46,16 @@ void demo_basic() {
     std::cout << "learning_rate : " << params.get<"learning_rate", double>() << "\n";
     std::cout << "dropout       : " << params.get<"dropout", double>() << "\n";
 
-    // ── 1b. int64_t ───────────────────────────────────────────────────────
-    subsection("1b. int64_t");
+    // ── 1b. int ───────────────────────────────────────────────────────
+    subsection("1b. int");
 
     params.set<"batch_size">(32);
     params.set<"epochs">(100);
     params.set<"seed">(42LL);
 
-    std::cout << "batch_size : " << params.get<"batch_size", int64_t>() << "\n";
-    std::cout << "epochs     : " << params.get<"epochs", int64_t>() << "\n";
-    std::cout << "seed       : " << params.get<"seed", int64_t>() << "\n";
+    std::cout << "batch_size : " << params.get<"batch_size", int>() << "\n";
+    std::cout << "epochs     : " << params.get<"epochs", int>() << "\n";
+    std::cout << "seed       : " << params.get<"seed", int>() << "\n";
 
     // ── 1c. bool ──────────────────────────────────────────────────────────
     subsection("1c. bool");
@@ -87,18 +87,18 @@ void demo_coercion() {
 
     ParameterRegistry params;
 
-    // ── 2a. Integral types → int64_t ──────────────────────────────────────
-    subsection("2a. Any integral type (short, int, long, …) → int64_t");
+    // ── 2a. Integral types → int ──────────────────────────────────────
+    subsection("2a. Any integral type (short, int, long, …) → int");
 
     params.set<"from_short">(static_cast<short>(7));
     params.set<"from_int">(42);
     params.set<"from_long">(1'000'000L);
     params.set<"from_longlong">(9'000'000'000LL);
 
-    std::cout << "from_short    : " << params.get<"from_short", int64_t>() << "\n";
-    std::cout << "from_int      : " << params.get<"from_int", int64_t>() << "\n";
-    std::cout << "from_long     : " << params.get<"from_long", int64_t>() << "\n";
-    std::cout << "from_longlong : " << params.get<"from_longlong", int64_t>() << "\n";
+    std::cout << "from_short    : " << params.get<"from_short", int>() << "\n";
+    std::cout << "from_int      : " << params.get<"from_int", int>() << "\n";
+    std::cout << "from_long     : " << params.get<"from_long", int>() << "\n";
+    std::cout << "from_longlong : " << params.get<"from_longlong", int>() << "\n";
 
     // ── 2b. Floating-point types → double ─────────────────────────────────
     subsection("2b. Any floating-point type (float, double, long double) → double");
@@ -112,7 +112,7 @@ void demo_coercion() {
     std::cout << "from_ldouble : " << params.get<"from_ldouble", double>() << "\n";
 
     // ── 2c. bool is matched before integral ───────────────────────────────
-    subsection("2c. bool literal → bool (not int64_t)");
+    subsection("2c. bool literal → bool (not int)");
 
     params.set<"flag_true">(true);
     params.set<"flag_false">(false);
@@ -145,20 +145,20 @@ void demo_stored_as() {
     // ── 3a. Force int literal to double ───────────────────────────────────
     subsection("3a. set<name, double>(0)  — int literal forced to double");
 
-    params.set<"threshold", double>(0);  // without StoredAs this would be int64_t
+    params.set<"threshold", double>(0);  // without StoredAs this would be int
     params.set<"scale", double>(1);
 
     std::cout << "threshold : " << params.get<"threshold", double>() << " (double)\n";
     std::cout << "scale     : " << params.get<"scale", double>() << " (double)\n";
 
-    // ── 3b. Force double literal to int64_t (truncates) ───────────────────
-    subsection("3b. set<name, int64_t>(3.9)  — double truncated to int64_t");
+    // ── 3b. Force double literal to int (truncates) ───────────────────
+    subsection("3b. set<name, int>(3.9)  — double truncated to int");
 
-    params.set<"max_steps", int64_t>(1e6);  // 1e6 is a double literal
-    params.set<"truncated", int64_t>(3.9);
+    params.set<"max_steps", int>(1e6);  // 1e6 is a double literal
+    params.set<"truncated", int>(3.9);
 
-    std::cout << "max_steps : " << params.get<"max_steps", int64_t>() << "\n";
-    std::cout << "truncated : " << params.get<"truncated", int64_t>() << " (was 3.9)\n";
+    std::cout << "max_steps : " << params.get<"max_steps", int>() << "\n";
+    std::cout << "truncated : " << params.get<"truncated", int>() << " (was 3.9)\n";
 
     // ── 3c. Force int to bool ─────────────────────────────────────────────
     subsection("3c. set<name, bool>(1)  — int literal forced to bool");
@@ -218,7 +218,7 @@ void demo_errors() {
     // ── 5b. get with wrong type → std::runtime_error ─────────────────
     subsection("5b. get<n, WrongType> → std::runtime_error");
 
-    params.set<"count">(42);  // stored as int64_t
+    params.set<"count">(42);  // stored as int
 
     try {
         [[maybe_unused]] auto v = params.get<"count", double>();  // wrong type
@@ -268,7 +268,7 @@ void demo_global() {
     PARAMS.set<"app.debug">(false);
 
     std::cout << "app.name    : " << PARAMS.get<"app.name", std::string>() << "\n";
-    std::cout << "app.version : " << PARAMS.get<"app.version", int64_t>() << "\n";
+    std::cout << "app.version : " << PARAMS.get<"app.version", int>() << "\n";
     std::cout << "app.debug   : " << std::boolalpha << PARAMS.get<"app.debug", bool>() << "\n";
 
     PARAMS.print_report();

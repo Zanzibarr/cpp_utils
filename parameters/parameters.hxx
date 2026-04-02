@@ -3,7 +3,7 @@
 /**
  * @file parameters.hxx
  * @brief O(1) compile-time named parameter registry with type-safe get/set.
- * @version 1.0.0
+ * @version 1.1.0
  *
  * @details
  * `ParameterRegistry` stores named values indexed by `CTString` literals.
@@ -34,10 +34,9 @@
 
 #include <array>
 #include <atomic>
-#include <iomanip>
+#include <format>
 #include <iostream>
 #include <ostream>
-#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -53,7 +52,9 @@
 namespace param_detail {
 
 // Concept covering all types accepted by ParameterRegistry::set().
-// bool is listed first so it matches before the generic is_integral check.
+// bool satisfies is_integral too — it is listed explicitly so the intent
+// is clear.  The actual dispatch order (bool before int) is enforced inside
+// set()'s if constexpr chain, not by the concept itself.
 template <typename T>
 concept SupportedParamType = std::is_same_v<std::decay_t<T>, bool> || std::is_integral_v<std::decay_t<T>> ||
                              std::is_floating_point_v<std::decay_t<T>> || std::is_constructible_v<std::string, std::decay_t<T>>;
@@ -82,8 +83,8 @@ struct CtParamID {
 /**
  * ParameterRegistry — stores named parameters indexed by compile-time strings.
  *
- * Parameters are written once (during initialisation, single-threaded) and
- * then read-only. Lookup is O(1) array indexing — no hash map at runtime.
+ * Parameters are written during initialisation (single-threaded) and then
+ * read-only.  Lookup is O(1) array indexing — no hash map at runtime.
  *
  * Supported value types: int, double, bool, std::string.
  * Type coercions applied automatically on set():
@@ -94,8 +95,12 @@ struct CtParamID {
  *
  * Thread safety
  * ─────────────
- * Not thread-safe. All set() calls must complete before any get() call is
- * made from another thread. No locking is provided or needed.
+ * Not thread-safe.  All set() calls must complete before any get() call is
+ * made from another thread.  No locking is provided or needed.
+ *
+ * Note: clear/reset is not supported.  ParameterRegistry is designed for the
+ * write-once, read-many pattern.  Repeated set() calls on the same name
+ * overwrite the previous value but do not change insertion order.
  *
  * Usage
  * ─────
@@ -107,10 +112,11 @@ struct CtParamID {
  *
  *   double      lr  = params.get<"learning_rate", double>();
  *   int         bs  = params.get<"batch_size",    int>();
- *   bool        sh  = params.get<"shuffle",        bool>();
- *   std::string opt = params.get<"optimizer",      std::string>();
+ *   bool        sh  = params.get<"shuffle",       bool>();
+ *   std::string opt = params.get<"optimizer",     std::string>();
  *
  *   if (params.has<"dropout">()) { ... }
+ *   std::cout << "set: " << params.size() << " params\n";
  *
  *   params.print_report();
  */
@@ -120,22 +126,23 @@ class ParameterRegistry {
     using Value = std::variant<int, double, bool, std::string>;
 
     // Maximum number of distinct compile-time parameter names across the whole
-    // program. Raise if you hit the abort() in assign_param_id().
+    // program.  Raise if assign_param_id() throws std::overflow_error.
     // Keep in sync with MAX_CT_TIMERS (timer/timer.hxx)
     // and MAX_CT_STATS (stats_registry/stats_registry.hxx) — all default to 128.
     static constexpr std::size_t MAX_CT_PARAMS = 128;
 
     /**
      * Assigns a unique sequential index to a compile-time parameter hash.
-     * Called once per unique CTString at static-init time via CtParamID<H>::value.
+     * Called once per unique CTString at first-use time via CtParamID<H>::value.
      * Thread-safe via a static atomic counter.
+     *
+     * @throws std::overflow_error if more than MAX_CT_PARAMS unique names are used.
      */
     static auto assign_param_id(std::size_t /*hash*/) -> std::size_t {
         static std::atomic<std::size_t> next{0};
-        std::size_t idx = next.fetch_add(1, std::memory_order_relaxed);
+        const std::size_t idx = next.fetch_add(1, std::memory_order_relaxed);
         if (idx >= MAX_CT_PARAMS) {
-            std::cerr << "ParameterRegistry: MAX_CT_PARAMS (" << MAX_CT_PARAMS << ") exceeded. Increase the limit.\n";
-            std::abort();
+            throw std::overflow_error(std::format("ParameterRegistry: MAX_CT_PARAMS ({}) exceeded — increase the limit.", MAX_CT_PARAMS));
         }
         return idx;
     }
@@ -184,9 +191,9 @@ class ParameterRegistry {
         auto& slot = slots_[idx];
 
         if (slot.active && slot.name != Name.view()) {
-            // Two different names mapped to the same slot — data corruption would occur silently
-            throw std::logic_error(std::string("ParameterRegistry: FNV-1a hash collision between '") + slot.name + "' and '" +
-                                   std::string(Name.view()) + "' (same slot index)");
+            // Two different names mapped to the same slot — data corruption would occur silently.
+            throw std::logic_error(std::format("ParameterRegistry: FNV-1a hash collision between '{}' and '{}' (same slot index)",
+                                               slot.name, std::string(Name.view())));
         }
 
         slot.value = std::move(stored);
@@ -200,25 +207,30 @@ class ParameterRegistry {
     // ── Read ──────────────────────────────────────────────────────────────
 
     /**
-     * Returns a const reference to the stored value for Name as type T.
-     * T must exactly match the type that was coerced during set<n>():
+     * Returns the stored value for Name.
+     * Primitives (int, double, bool) are returned by value; std::string is
+     * returned by const reference to avoid a copy on every call.
+     * The reference is valid for the lifetime of the registry, provided
+     * set() is not called again for the same name after the reference is taken.
+     *
+     * T must exactly match the type coerced during set<Name>():
      *   - integers  → int
      *   - floats    → double
      *   - bool      → bool
      *   - strings   → std::string
      *
-     * @throws std::out_of_range       if Name has not been set.
-     * @throws std::runtime_error if T does not match the stored type.
+     * @throws std::out_of_range   if Name has not been set.
+     * @throws std::runtime_error  if T does not match the stored type.
      */
     template <CTString Name, typename T>
-    [[nodiscard]] auto get() const -> const T& {
+    [[nodiscard]] auto get() const -> std::conditional_t<std::is_same_v<T, std::string>, const T&, T> {
         const std::size_t idx = CtParamID<hash_name(Name)>::value;
         const auto& slot = slots_[idx];
         if (!slot.active) {
-            throw std::out_of_range(std::string("ParameterRegistry: parameter not set: ") + std::string(Name.view()));
+            throw std::out_of_range(std::format("ParameterRegistry: parameter not set: {}", std::string(Name.view())));
         }
         if (!std::holds_alternative<T>(slot.value)) {
-            throw std::runtime_error(std::string("ParameterRegistry: type mismatch for ") + std::string(Name.view()));
+            throw std::runtime_error(std::format("ParameterRegistry: type mismatch for {}", std::string(Name.view())));
         }
         return std::get<T>(slot.value);
     }
@@ -230,6 +242,11 @@ class ParameterRegistry {
     [[nodiscard]] auto has() const noexcept -> bool {
         return slots_[CtParamID<hash_name(Name)>::value].active;
     }
+
+    /**
+     * Returns the number of parameters currently set.
+     */
+    [[nodiscard]] auto size() const noexcept -> std::size_t { return active_indices_.size(); }
 
     // ── Report ────────────────────────────────────────────────────────────
 
@@ -258,17 +275,16 @@ class ParameterRegistry {
      *   Parameter          Type      Value
      *   ──────────────────────────────────────────
      *   learning_rate      double    0.001
-     *   batch_size         int64     32
+     *   batch_size         int       32
      *   shuffle            bool      true
      *   optimizer          string    "adam"
      */
     void print_report() const { std::cout << *this; }
 
     explicit operator std::string() const {
-        std::ostringstream oss;
         const auto rows = get_report();
         if (rows.empty()) {
-            return oss.str();
+            return {};
         }
         constexpr std::size_t MIN_NAME_WIDTH = 12;
         constexpr std::size_t MIN_TYPE_WIDTH = 8;
@@ -278,14 +294,13 @@ class ParameterRegistry {
             name_width = std::max(name_width, row.name.size() + 2);
             type_width = std::max(type_width, row.type.size() + 2);
         }
-        oss << std::left << std::setw(static_cast<int>(name_width)) << "Parameter" << std::setw(static_cast<int>(type_width)) << "Type"
-            << "Value\n"
-            << std::string(name_width + type_width + 20, '-') << "\n";
+        std::string result;
+        result += std::format("{:<{}}{:<{}}Value\n", "Parameter", name_width, "Type", type_width);
+        result += box_line(name_width + type_width + 20) + '\n';
         for (const auto& row : rows) {
-            oss << std::left << std::setw(static_cast<int>(name_width)) << row.name << std::setw(static_cast<int>(type_width)) << row.type
-                << row.value_str << "\n";
+            result += std::format("{:<{}}{:<{}}{}\n", row.name, name_width, row.type, type_width, row.value_str);
         }
-        return oss.str();
+        return result;
     }
 
     friend auto operator<<(std::ostream& ostr, const ParameterRegistry& reg) -> std::ostream& { return ostr << static_cast<std::string>(reg); }
@@ -297,10 +312,24 @@ class ParameterRegistry {
         bool active = false;
     };
 
-    static auto type_name_(const Value& v) -> std::string {
+    std::array<Slot, MAX_CT_PARAMS> slots_;
+    std::vector<std::size_t> active_indices_;  // insertion order for reporting
+
+    // ── Formatting helpers ────────────────────────────────────────────────
+
+    static auto box_line(std::size_t char_count) -> std::string {
+        std::string line;
+        line.reserve(char_count * 3);  // "─" (U+2500) is 3 UTF-8 bytes
+        for (std::size_t i = 0; i < char_count; ++i) {
+            line += "─";
+        }
+        return line;
+    }
+
+    static auto type_name_(const Value& val) -> std::string {
         return std::visit(
-            [](const auto& val) -> std::string {
-                using T = std::decay_t<decltype(val)>;
+            [](const auto& v) -> std::string {
+                using T = std::decay_t<decltype(v)>;
                 if constexpr (std::is_same_v<T, int>) {
                     return "int";
                 }
@@ -312,37 +341,30 @@ class ParameterRegistry {
                 }
                 return "string";
             },
-            v);
+            val);
     }
 
-    static auto format_value_(const Value& v) -> std::string {
+    static auto format_value_(const Value& val) -> std::string {
         return std::visit(
-            [](const auto& val) -> std::string {
-                using T = std::decay_t<decltype(val)>;
+            [](const auto& v) -> std::string {
+                using T = std::decay_t<decltype(v)>;
                 if constexpr (std::is_same_v<T, bool>) {
-                    return val ? "true" : "false";
+                    return v ? "true" : "false";
                 } else if constexpr (std::is_same_v<T, std::string>) {
-                    return '"' + val + '"';
-                } else if constexpr (std::is_same_v<T, double>) {
-                    std::ostringstream oss;
-                    oss << val;
-                    return oss.str();
+                    return '"' + v + '"';
                 } else {
-                    return std::to_string(val);
+                    return std::format("{}", v);
                 }
             },
-            v);
+            val);
     }
-
-    std::array<Slot, MAX_CT_PARAMS> slots_;
-    std::vector<std::size_t> active_indices_;  // insertion order for reporting
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CtParamID — maps a compile-time hash to a unique sequential parameter index.
 //
 // Instantiated once per unique CTString across the whole program.
-// The static value is assigned at program startup via ParameterRegistry::assign_param_id().
+// The static value is assigned on first use via ParameterRegistry::assign_param_id().
 // ─────────────────────────────────────────────────────────────────────────────
 
 template <std::size_t Hash>
