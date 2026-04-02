@@ -3,7 +3,7 @@
 /**
  * @file argparser.hxx
  * @brief CLI argument parser with fluent builder API and optional TOML config overlay.
- * @version 2.0.0
+ * @version 2.1.0
  *
  * @details
  * `ArgParser` parses `argv` into a `ParameterRegistry` (from `parameters.hxx`)
@@ -12,14 +12,13 @@
  *
  * Arguments are registered with a fluent builder:
  * @code
- *   parser.add<"lr">().flag("--learning-rate").type<double>().default_val(0.01)
- *                     .help("Learning rate").required(false);
+ *   parser.add<"lr", double>().shorthand('l').description("Learning rate")
+ *                             .default_val(0.01).require();
  * @endcode
  *
  * Key features:
  *   - Short (`-x`) and long (`--xx`) flag aliases, both optional.
- *   - Positional arguments (`positional(true)`).
- *   - Auto-generated `--help` / `-h` output with aligned columns.
+ *   - Auto-generated `--help` / `-h` output with dynamically aligned columns.
  *   - TOML config file overlay: `--config path.toml` loads a TOML file
  *     (built-in minimal parser, no external dependencies) and merges its
  *     values before CLI flags, so CLI always wins.
@@ -41,13 +40,14 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
-#include <map>
 #include <optional>
-#include <set>
-#include <sstream>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <typeindex>
+#include <unordered_map>
+#include <unordered_set>
 #include <variant>
 #include <vector>
 
@@ -78,23 +78,34 @@ struct Arg {
     std::type_index type{typeid(void)};
 
     std::optional<Value> defaultValue;
-    std::optional<Value> minValue;  // inclusive, for int
-    std::optional<Value> maxValue;  // inclusive, for int
+    std::optional<Value> minValue;  // inclusive, for int/double
+    std::optional<Value> maxValue;  // inclusive, for int/double
     std::vector<Value> choices;     // allowed values (any type)
 
-    std::function<void(Value)> setter;  // populates the ParameterRegistry on parse()
+    std::function<void(const Value&)> setter;  // populates the ParameterRegistry on parse()
 
     // ── fluent builders ────────────────────────────────────────────────
+
+    /**
+     * Sets the single-character short flag alias.
+     * '-h' and '-C' are reserved and will throw.
+     */
     auto shorthand(char short_name) -> Arg& {
         if (short_name == 0) {
             throw ParseError("Cannot set 0 as short name");
+        }
+        if (short_name == 'h') {
+            throw ParseError("Short name 'h' is reserved for --help");
+        }
+        if (short_name == 'C') {
+            throw ParseError("Short name 'C' is reserved for --config");
         }
         shortName = short_name;
         return *this;
     }
 
-    auto description(std::string_view description) -> Arg& {
-        help = description;
+    auto description(std::string_view desc) -> Arg& {
+        help = desc;
         return *this;
     }
 
@@ -109,14 +120,28 @@ struct Arg {
         return *this;
     }
 
+    /**
+     * Sets an inclusive lower bound.
+     * @throws ParseError if the argument type is not `int` or `double`.
+     */
     template <typename T>
     auto min(T value) -> Arg& {
+        if (type != typeid(int) && type != typeid(double)) {
+            throw ParseError(std::format("min/max constraints only apply to numeric types (--{})", name));
+        }
         minValue = normalize_and_store(value);
         return *this;
     }
 
+    /**
+     * Sets an inclusive upper bound.
+     * @throws ParseError if the argument type is not `int` or `double`.
+     */
     template <typename T>
     auto max(T value) -> Arg& {
+        if (type != typeid(int) && type != typeid(double)) {
+            throw ParseError(std::format("min/max constraints only apply to numeric types (--{})", name));
+        }
         maxValue = normalize_and_store(value);
         return *this;
     }
@@ -128,6 +153,9 @@ struct Arg {
         }
         return *this;
     }
+
+   private:
+    friend class ArgParser;
 
     template <typename T>
     auto normalize_and_store(T value) -> Value {
@@ -151,7 +179,7 @@ struct Arg {
                 return Value{static_cast<int>(value)};
             }
             if (type == typeid(double)) {
-                return Value{static_cast<double>(value)};  // ← coerce int literals to double
+                return Value{static_cast<double>(value)};  // coerce int literals to double
             }
             throw ParseError("type mismatch: expected int or double");
         } else {
@@ -181,23 +209,23 @@ class ArgParser {
      *
      * @tparam Name  Compile-time argument name (also the key in `ParameterRegistry`).
      * @tparam T     CLI value type: `int`, `double`, `bool`, `std::string`.
-     *               After `parse()`, values are stored with these coercions:
-     *               `int` → `int`, `double` → `double`,
-     *               `bool` → `bool`, `string`/`path` → `std::string`.
      * @throws ParseError if a duplicate `Name` is registered.
      */
     template <CTString Name, typename T>
     auto add() -> Arg& {
         const std::string name_str{Name.view()};
-        if (find_arg(name_str) != nullptr) {
-            throw ParseError(std::format("duplicate argument registration: --{}", name_str));
+        // Linear scan is fine here — registration happens once and n is small.
+        for (const auto& existing : args_) {
+            if (existing.name == name_str) {
+                throw ParseError(std::format("duplicate argument registration: --{}", name_str));
+            }
         }
 
         args_.push_back(Arg{
             .name = name_str,
             .type = typeid(T),
             .setter =
-                [this](Value val) {
+                [this](const Value& val) {
                     if constexpr (std::is_same_v<T, int>) {
                         reg_.set<Name, int>(std::get<int>(val));
                     } else if constexpr (std::is_same_v<T, double>) {
@@ -214,27 +242,21 @@ class ArgParser {
     }
 
     /**
-     * Manually set a parameter value
+     * Manually sets a parameter value, bypassing the CLI.
      *
-     * @throws ParseError if the parameter doesn't exist
+     * @throws ParseError if the parameter is not registered.
      */
     template <CTString Name, typename T>
     auto set(T value) -> void {
         const std::string name_str{Name.view()};
-
-        // Find the registered argument
         Arg* arg = find_arg(name_str);
         if (arg == nullptr) {
             throw ParseError(std::format("unknown argument: --{}", name_str));
         }
-
-        // Reuse existing normalization + validation logic
         Value normalized = arg->normalize_and_store(value);
         validate(*arg, normalized);
-
-        // Update both stores
-        parsed_[name_str] = normalized;  // ← raw map
-        arg->setter(normalized);         // ← ParameterRegistry
+        parsed_[name_str] = normalized;
+        arg->setter(normalized);
     }
 
     /**
@@ -246,44 +268,19 @@ class ArgParser {
      *
      * @throws ParseError on unknown flags, missing required args, type errors, etc.
      */
-
-    void parse(int argc, char* argv[]) { parse_impl(argc, argv); }
+    void parse(int argc, char** argv) { parse_impl(std::span<char*>(argv, static_cast<std::size_t>(argc))); }
 
     /**
-     * Parses `argv` and populates the `ParameterRegistry`.
-     *
-     * Precedence (lowest → highest): defaults < TOML config < CLI flags.
-     * `--config <file>` is consumed before the second CLI pass and never
-     * forwarded to the normal argument matching logic.
-     *
-     * Add a callback (lambda, function, functor) to be called after parsing (for additional checks on the parsed parameters)
+     * Parses `argv` and invokes `callback` with `*this` after a successful parse.
+     * Use the callback for cross-argument validation that cannot be expressed
+     * per-argument (e.g. mutual exclusion).
      *
      * @throws ParseError on unknown flags, missing required args, type errors, etc.
      */
-
     template <std::invocable<ArgParser&> Callback>
-    void parse(int argc, char* argv[], Callback&& callback) {
-        parse_impl(argc, argv);
+    void parse(int argc, char** argv, Callback&& callback) {
+        parse_impl(std::span<char*>(argv, static_cast<std::size_t>(argc)));
         std::invoke(std::forward<Callback>(callback), *this);
-    }
-
-    /**
-     * Parses `argv` and populates the `ParameterRegistry`.
-     *
-     * Precedence (lowest → highest): defaults < TOML config < CLI flags.
-     * `--config <file>` is consumed before the second CLI pass and never
-     * forwarded to the normal argument matching logic.
-     *
-     * Add a callback (std::function) to be called after parsing (for additional checks on the parsed parameters)
-     *
-     * @throws ParseError on unknown flags, missing required args, type errors, etc.
-     */
-
-    void parse(int argc, char* argv[], std::function<void(ArgParser&)> callback) {
-        parse_impl(argc, argv);
-        if (callback) {
-            std::invoke(callback, *this);
-        }
     }
 
     // ── accessors ──────────────────────────────────────────────────────
@@ -297,15 +294,11 @@ class ArgParser {
     /**
      * Returns the parsed value for `Name` as type `T`.
      *
-     * Reverse coercions applied automatically:
-     *   - `int`      ← `int64_t` (narrowing cast)
-     *   - others     ← direct `std::get<T>`
-     *
      * @throws std::out_of_range       if `Name` was not parsed.
      * @throws std::bad_variant_access if `T` does not match the stored type.
      */
     template <CTString Name, typename T>
-    [[nodiscard]] auto get() const -> T {
+    [[nodiscard]] auto get() const -> std::conditional_t<std::is_same_v<T, std::string>, const T&, T> {
         return reg_.get<Name, T>();
     }
 
@@ -316,14 +309,24 @@ class ArgParser {
 
     /** Prints formatted usage and option descriptions to stdout. */
     void print_help() const {
-        constexpr std::size_t HELP_COLUMN_WIDTH = 22;
+        const std::size_t col_width = compute_help_col_width();
+
+        auto pad_left = [&](std::string left) -> std::string {
+            if (left.size() < col_width) {
+                left.resize(col_width, ' ');
+            } else {
+                left += ' ';
+            }
+            return left;
+        };
+
         std::cout << "Usage: " << programName_ << " [options]\n";
         if (!description_.empty()) {
             std::cout << description_ << "\n";
         }
         std::cout << "\nOptions:\n";
-        std::cout << "  -h, --help          Show this help message\n";
-        std::cout << "  -C, --config <file> Load parameters from a TOML config file\n";
+        std::cout << pad_left("  -h, --help") << "Show this help message\n";
+        std::cout << pad_left("  -C, --config <file>") << "Load parameters from a TOML config file\n";
 
         for (const auto& arg : args_) {
             std::string left = "  --" + arg.name;
@@ -331,41 +334,97 @@ class ArgParser {
                 left += std::format(", -{}", arg.shortName);
             }
             left += std::format(" <{}>", type_to_string(arg.type));
-
-            if (left.size() < HELP_COLUMN_WIDTH) {
-                left.resize(HELP_COLUMN_WIDTH, ' ');
-            } else {
-                left += ' ';
-            }
-            std::cout << left << arg.help;
-
-            if (arg.defaultValue) {
-                std::cout << std::format(" [default: {}]", value_to_string(*arg.defaultValue));
-            }
-            if (arg.minValue && arg.maxValue) {
-                std::cout << std::format(" [range: {}..{}]", value_to_string(*arg.minValue), value_to_string(*arg.maxValue));
-            }
-            if (!arg.choices.empty()) {
-                std::cout << " [choices: ";
-                for (std::size_t i = 0; i < arg.choices.size(); ++i) {
-                    if (i != 0U) {
-                        std::cout << '|';
-                    }
-                    std::cout << value_to_string(arg.choices[i]);
-                }
-                std::cout << ']';
-            }
-            if (arg.required) {
-                std::cout << " (required)";
-            }
-            std::cout << '\n';
+            std::cout << pad_left(std::move(left)) << arg.help << format_arg_annotations(arg) << '\n';
         }
     }
 
    private:
+    // ── help helpers ──────────────────────────────────────────────────
+
+    static constexpr std::size_t MIN_HELP_COL_WIDTH = 24;
+
+    [[nodiscard]] auto compute_help_col_width() const -> std::size_t {
+        std::size_t width = MIN_HELP_COL_WIDTH;
+        for (const auto& arg : args_) {
+            std::size_t len = 4 + arg.name.size();  // "  --name"
+            if (arg.shortName != 0) {
+                len += 4;  // ", -x"
+            }
+            len += 3 + type_to_string(arg.type).size();  // " <type>"
+            width = std::max(width, len + 2);
+        }
+        return width;
+    }
+
+    [[nodiscard]] static auto format_arg_annotations(const Arg& arg) -> std::string {
+        std::string result;
+        if (arg.defaultValue) {
+            result += std::format(" [default: {}]", value_to_string(*arg.defaultValue));
+        }
+        if (arg.minValue && arg.maxValue) {
+            result += std::format(" [range: {}..{}]", value_to_string(*arg.minValue), value_to_string(*arg.maxValue));
+        }
+        if (!arg.choices.empty()) {
+            result += " [choices: ";
+            for (std::size_t i = 0; i < arg.choices.size(); ++i) {
+                if (i != 0U) {
+                    result += '|';
+                }
+                result += value_to_string(arg.choices[i]);
+            }
+            result += ']';
+        }
+        if (arg.required) {
+            result += " (required)";
+        }
+        return result;
+    }
+
+    // ── lookup index ───────────────────────────────────────────────────
+    // Built once at the start of parse_impl(); stable because args_ is not
+    // modified after registration ends.
+
+    std::unordered_map<std::string, std::size_t> name_map_;  // name  → index into args_
+    std::unordered_map<char, std::size_t> short_map_;        // short → index into args_
+
+    void build_lookup_maps() {
+        name_map_.clear();
+        short_map_.clear();
+        for (std::size_t i = 0; i < args_.size(); ++i) {
+            name_map_.emplace(args_[i].name, i);
+            if (args_[i].shortName != 0) {
+                short_map_.emplace(args_[i].shortName, i);
+            }
+        }
+    }
+
+    auto find_arg(const std::string& key) -> Arg* {
+        if (!name_map_.empty()) {
+            auto name_iter = name_map_.find(key);
+            return name_iter != name_map_.end() ? &args_[name_iter->second] : nullptr;
+        }
+        // Pre-parse fallback used during registration (add() duplicate check, set()).
+        for (auto& arg : args_) {
+            if (arg.name == key) {
+                return &arg;
+            }
+        }
+        return nullptr;
+    }
+
+    auto expand_short(char short_ch) -> std::string {
+        auto short_iter = short_map_.find(short_ch);
+        if (short_iter == short_map_.end()) {
+            throw ParseError(std::format("unknown short option: -{}", short_ch));
+        }
+        return args_[short_iter->second].name;
+    }
+
     // ── CLI parser ─────────────────────────────────────────────────────
 
-    void parse_impl(int argc, char* argv[]) {
+    void parse_impl(std::span<char*> argv_span) {
+        build_lookup_maps();
+
         // 1. Seed defaults
         for (auto& arg : args_) {
             if (arg.defaultValue) {
@@ -374,13 +433,15 @@ class ArgParser {
         }
 
         std::vector<std::string> tokens;
-        for (int i = 1; i < argc; ++i) {
-            tokens.emplace_back(argv[i]);
+        tokens.reserve(argv_span.size() > 0 ? argv_span.size() - 1 : 0);
+        for (std::size_t i = 1; i < argv_span.size(); ++i) {
+            tokens.emplace_back(argv_span[i]);
         }
 
         // 2. First pass: find --config and load TOML (values go into parsed_
         //    but will be overwritten by any CLI flag in the second pass).
         std::vector<std::string> remaining;
+        remaining.reserve(tokens.size());
         for (std::size_t i = 0; i < tokens.size(); ++i) {
             if (tokens[i] == "--config" || tokens[i] == "-C") {
                 if (i + 1 >= tokens.size()) {
@@ -396,7 +457,7 @@ class ArgParser {
         parse_cli_arguments(remaining);
 
         // 4. Check required
-        for (auto& arg : args_) {
+        for (const auto& arg : args_) {
             if (arg.required && !parsed_.contains(arg.name)) {
                 throw ParseError(std::format("required argument missing: --{}", arg.name));
             }
@@ -404,9 +465,9 @@ class ArgParser {
 
         // 5. Populate the compile-time ParameterRegistry from all parsed values.
         for (const auto& arg : args_) {
-            auto iter = parsed_.find(arg.name);
-            if (iter != parsed_.end()) {
-                arg.setter(iter->second);
+            auto parsed_iter = parsed_.find(arg.name);
+            if (parsed_iter != parsed_.end()) {
+                arg.setter(parsed_iter->second);
             }
         }
     }
@@ -414,7 +475,7 @@ class ArgParser {
     // ── CLI argument processor ─────────────────────────────────────────
 
     void parse_cli_arguments(const std::vector<std::string>& remaining) {
-        std::set<std::string> seenCli;
+        std::unordered_set<std::string> seen_cli;
         for (std::size_t i = 0; i < remaining.size(); ++i) {
             const auto& tok = remaining[i];
 
@@ -437,7 +498,7 @@ class ArgParser {
                 throw ParseError(std::format("unknown argument: --{}", key));
             }
 
-            if (!seenCli.insert(key).second) {
+            if (!seen_cli.insert(key).second) {
                 throw ParseError(std::format("duplicate CLI argument: --{}", key));
             }
 
@@ -474,20 +535,14 @@ class ArgParser {
             throw ParseError(std::format("cannot open config file: {}", path));
         }
 
-        std::set<std::string> seenToml;
+        std::unordered_set<std::string> seen_toml;
         std::string line;
         while (std::getline(file, line)) {
-            // Strip inline comment and surrounding whitespace
             auto stripped = strip_comment(trim(line));
-            if (stripped.empty() || stripped[0] == '#') {
-                continue;
-            }
-            // Skip table headers like [args]
-            if (stripped[0] == '[') {
+            if (stripped.empty() || stripped[0] == '#' || stripped[0] == '[') {
                 continue;
             }
 
-            // Split on first '='
             auto equal = stripped.find('=');
             if (equal == std::string::npos) {
                 throw ParseError(std::format("wrongly formatted line in config file: {}", stripped));
@@ -496,13 +551,12 @@ class ArgParser {
             std::string key = trim(stripped.substr(0, equal));
             std::string rawVal = trim(stripped.substr(equal + 1));
 
-            // Only process keys that match a registered argument
             Arg* arg = find_arg(key);
             if (arg == nullptr) {
                 throw ParseError(std::format("unknown argument in config file: {}", key));
             }
 
-            if (!seenToml.insert(key).second) {
+            if (!seen_toml.insert(key).second) {
                 throw ParseError(std::format("duplicate key in config file: {}", key));
             }
 
@@ -525,16 +579,16 @@ class ArgParser {
 
     // Remove everything after the first '#' that is outside a quoted string.
     static auto strip_comment(const std::string& comment) -> std::string {
-        bool inDouble = false;
-        bool inSingle = false;
+        bool in_double = false;
+        bool in_single = false;
         for (std::size_t i = 0; i < comment.size(); ++i) {
-            if (comment[i] == '"' && !inSingle) {
-                inDouble = !inDouble;
+            if (comment[i] == '"' && !in_single) {
+                in_double = !in_double;
             }
-            if (comment[i] == '\'' && !inDouble) {
-                inSingle = !inSingle;
+            if (comment[i] == '\'' && !in_double) {
+                in_single = !in_single;
             }
-            if (comment[i] == '#' && !inDouble && !inSingle) {
+            if (comment[i] == '#' && !in_double && !in_single) {
                 return trim(comment.substr(0, i));
             }
         }
@@ -542,24 +596,6 @@ class ArgParser {
     }
 
     // ── helpers ────────────────────────────────────────────────────────
-
-    auto find_arg(const std::string& key) -> Arg* {
-        for (auto& arg : args_) {
-            if (arg.name == key) {
-                return &arg;
-            }
-        }
-        return nullptr;
-    }
-
-    auto expand_short(char short_name) -> std::string {
-        for (auto& arg : args_) {
-            if (arg.shortName == short_name) {
-                return arg.name;
-            }
-        }
-        throw ParseError(std::format("unknown short option: -{}", short_name));
-    }
 
     static auto parse_bool(const std::string& str) -> bool {
         if (str == "true" || str == "1" || str == "yes") {
@@ -582,8 +618,7 @@ class ArgParser {
         } else if constexpr (std::is_same_v<T, double>) {
             return Value{std::stod(raw)};
         }
-
-        throw ParseError("Unsupported type");
+        throw ParseError("unsupported type");
     }
 
     static auto parse_value(const Arg& arg, const std::string& raw) -> Value {
@@ -605,12 +640,12 @@ class ArgParser {
                 return convert_to_value<std::string>(clean);
             }
             if (arg.type == typeid(double)) {
-                return convert_to_value<double>(clean);  // ← was missing
+                return convert_to_value<double>(clean);
             }
         } catch (const std::exception& e) {
-            throw ParseError(std::format("Invalid value for --{}: {}", arg.name, e.what()));
+            throw ParseError(std::format("invalid value for --{}: {}", arg.name, e.what()));
         }
-        throw ParseError("Unknown type index");
+        throw ParseError("unknown type index");
     }
 
     static void validate(const Arg& arg, const Value& val) {
@@ -620,21 +655,21 @@ class ArgParser {
             }
         }
         if (std::holds_alternative<int>(val)) {
-            int int_value = std::get<int>(val);
-            if (arg.minValue && int_value < std::get<int>(*arg.minValue)) {
-                throw ParseError(std::format("--{}: value {} below minimum {}", arg.name, int_value, std::get<int>(*arg.minValue)));
+            int int_val = std::get<int>(val);
+            if (arg.minValue && int_val < std::get<int>(*arg.minValue)) {
+                throw ParseError(std::format("--{}: value {} below minimum {}", arg.name, int_val, std::get<int>(*arg.minValue)));
             }
-            if (arg.maxValue && int_value > std::get<int>(*arg.maxValue)) {
-                throw ParseError(std::format("--{}: value {} above maximum {}", arg.name, int_value, std::get<int>(*arg.maxValue)));
+            if (arg.maxValue && int_val > std::get<int>(*arg.maxValue)) {
+                throw ParseError(std::format("--{}: value {} above maximum {}", arg.name, int_val, std::get<int>(*arg.maxValue)));
             }
         }
         if (std::holds_alternative<double>(val)) {
-            double double_value = std::get<double>(val);
-            if (arg.minValue && double_value < std::get<double>(*arg.minValue)) {
-                throw ParseError(std::format("--{}: value {} below minimum {}", arg.name, double_value, std::get<double>(*arg.minValue)));
+            double double_val = std::get<double>(val);
+            if (arg.minValue && double_val < std::get<double>(*arg.minValue)) {
+                throw ParseError(std::format("--{}: value {} below minimum {}", arg.name, double_val, std::get<double>(*arg.minValue)));
             }
-            if (arg.maxValue && double_value > std::get<double>(*arg.maxValue)) {
-                throw ParseError(std::format("--{}: value {} above maximum {}", arg.name, double_value, std::get<double>(*arg.maxValue)));
+            if (arg.maxValue && double_val > std::get<double>(*arg.maxValue)) {
+                throw ParseError(std::format("--{}: value {} above maximum {}", arg.name, double_val, std::get<double>(*arg.maxValue)));
             }
         }
     }
@@ -645,16 +680,10 @@ class ArgParser {
                 using T = std::decay_t<decltype(val)>;
                 if constexpr (std::is_same_v<T, bool>) {
                     return val ? "true" : "false";
-                } else if constexpr (std::is_same_v<T, char>) {
-                    return std::string(1, val);
                 } else if constexpr (std::is_same_v<T, std::string>) {
                     return val;
-                } else if constexpr (std::is_same_v<T, double>) {
-                    std::ostringstream oss;
-                    oss << val;
-                    return oss.str();
                 } else {
-                    return std::to_string(val);
+                    return std::format("{}", val);
                 }
             },
             value);
@@ -679,7 +708,7 @@ class ArgParser {
     std::string programName_;
     std::string description_;
     std::vector<Arg> args_;
-    std::map<std::string, Value> parsed_;
+    std::unordered_map<std::string, Value> parsed_;
     ParameterRegistry reg_;
 };
 
@@ -689,7 +718,7 @@ class ArgParser {
  * Convenience wrapper: calls `parser.parse()` and returns `true` on success.
  * On `ParseError`, prints the error and the help message, then returns `false`.
  */
-inline auto argparser_parse(cli::ArgParser& parser, int argc, char* argv[]) -> bool {
+inline auto argparser_parse(cli::ArgParser& parser, int argc, char** argv) -> bool {
     try {
         parser.parse(argc, argv);
         return true;
@@ -701,33 +730,13 @@ inline auto argparser_parse(cli::ArgParser& parser, int argc, char* argv[]) -> b
 }
 
 /**
- * Convenience wrapper: calls `parser.parse()` and returns `true` on success.
- * On `ParseError`, prints the error and the help message, then returns `false`.
- *
- * Use a callback function (lambda, function, functor) to be called after the parsing for additional checks on the parsed parameters
- * This is supposed to be a void function, any return value will be discarded
+ * Convenience wrapper with a post-parse callback for cross-argument validation.
+ * Returns `true` on success; on `ParseError` prints the error and help, returns `false`.
  */
 template <std::invocable<cli::ArgParser&> Callback>
-inline auto argparser_parse(cli::ArgParser& parser, int argc, char* argv[], Callback&& callback) -> bool {
+inline auto argparser_parse(cli::ArgParser& parser, int argc, char** argv, Callback&& callback) -> bool {
     try {
         parser.parse(argc, argv, std::forward<Callback>(callback));
-        return true;
-    } catch (const cli::ParseError& e) {
-        std::cerr << "Error: " << e.what() << "\n";
-        parser.print_help();
-        return false;
-    }
-}
-
-/**
- * Convenience wrapper: calls `parser.parse()` and returns `true` on success.
- * On `ParseError`, prints the error and the help message, then returns `false`.
- *
- * Use a callback function (std::function) to be called after the parsing for additional checks on the parsed parameters
- */
-inline auto argparser_parse(cli::ArgParser& parser, int argc, char* argv[], std::function<void(cli::ArgParser&)> callback) -> bool {
-    try {
-        parser.parse(argc, argv, std::move(callback));
         return true;
     } catch (const cli::ParseError& e) {
         std::cerr << "Error: " << e.what() << "\n";
