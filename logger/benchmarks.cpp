@@ -1,139 +1,173 @@
 /**
  * @file bench_logger_simple.cpp
- * @brief Simple timing comparison: loop with vs without logging.
+ * @brief Benchmark producer-side latency and total throughput against a real file sink.
  *
  * Compile (C++20):
  *   g++ -std=c++20 -O2 -pthread bench_logger_simple.cpp -o bench_logger_simple
  *
- * Output is suppressed via rdbuf swap so terminal I/O doesn't dominate.
+ * Two metrics per variant:
+ *   - enqueue_ms : time for the producer loop only (what the hot path pays)
+ *   - total_ms   : enqueue + flush (all bytes on disk)
  */
 
 #include <chrono>
+#include <cstdio>
 #include <iostream>
-#include <streambuf>
 #include <string>
 
 #include "logger.hxx"
 
 using enum LoggerLevel;
-
-// ── /dev/null sink ────────────────────────────────────────────────────────────
-
-struct NullBuf : std::streambuf {
-    auto overflow(int c) -> int override { return c; }
-    auto xsputn(const char*, std::streamsize n) -> std::streamsize override { return n; }
-};
-
-// ── Timing helper ─────────────────────────────────────────────────────────────
-
 using clk = std::chrono::steady_clock;
 
 static auto now_ms() -> double { return std::chrono::duration<double, std::milli>(clk::now().time_since_epoch()).count(); }
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-static constexpr int ITERATIONS = 1'000'000;
+static constexpr int ITERATIONS = 100'000;  // fewer — we're hitting real disk
 static const std::string MSG = "request processed: id=12345 status=200 latency=42ms";
+
+static constexpr const char* SYNC_FILE = "/tmp/bench_sync.log";
+static constexpr const char* ASYNC_FILE = "/tmp/bench_async.log";
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+static void remove_file(const char* path) { std::remove(path); }
 
 // ─────────────────────────────────────────────────────────────────────────────
 
 auto main() -> int {
-    // Redirect logger output to /dev/null so we measure CPU not I/O.
-    // We do this AFTER cout is set up so our own print calls still work.
-    NullBuf null_buf;
+    volatile int sink = 0;
 
-    Logger log;
-    log.set_min_level(DEBUG);
-
-    // ── 1. Baseline: loop with no logging ─────────────────────────────────────
-    volatile int sink = 0;  // prevent the loop being optimised away
-
+    // ── Baseline ──────────────────────────────────────────────────────────────
     double t0 = now_ms();
-    for (int i = 0; i < ITERATIONS; ++i) {
-        sink += i;
-    }
+    for (int i = 0; i < ITERATIONS; ++i) sink += i;
     double baseline_ms = now_ms() - t0;
 
-    // ── 2. Sync logger, string API ────────────────────────────────────────────
+    // ── 1. Sync / string ──────────────────────────────────────────────────────
     {
-        std::streambuf* old_cout = std::cout.rdbuf(&null_buf);
-        std::streambuf* old_cerr = std::cerr.rdbuf(&null_buf);
+        remove_file(SYNC_FILE);
+        Logger log(LoggerConfig{}.with_stdout(false).with_file(SYNC_FILE).with_min_level(DEBUG));
 
         t0 = now_ms();
         for (int i = 0; i < ITERATIONS; ++i) {
             sink += i;
             log.info(MSG);
         }
-        double sync_string_ms = now_ms() - t0;
+        double enqueue_ms = now_ms() - t0;
+        log.flush();
+        double total_ms = now_ms() - t0;
 
-        std::cout.rdbuf(old_cout);
-        std::cerr.rdbuf(old_cerr);
-
-        std::cout << "[sync  / string ] total: " << sync_string_ms << " ms"
-                  << "   overhead vs baseline: " << (sync_string_ms - baseline_ms) << " ms"
-                  << "   per-call: " << (sync_string_ms / ITERATIONS * 1e6) << " ns\n";
+        std::cout << "[sync  / string ] enqueue: " << enqueue_ms << " ms"
+                  << "   total: " << total_ms << " ms"
+                  << "   overhead vs baseline: " << (enqueue_ms - baseline_ms) << " ms"
+                  << "   per-call: " << (enqueue_ms / ITERATIONS * 1e6) << " ns\n";
     }
 
-    // ── 3. Sync logger, stream API ────────────────────────────────────────────
+    // ── 2. Sync / stream ──────────────────────────────────────────────────────
     {
-        std::streambuf* old_cout = std::cout.rdbuf(&null_buf);
-        std::streambuf* old_cerr = std::cerr.rdbuf(&null_buf);
+        remove_file(SYNC_FILE);
+        Logger log(LoggerConfig{}.with_stdout(false).with_file(SYNC_FILE).with_min_level(DEBUG));
 
         t0 = now_ms();
         for (int i = 0; i < ITERATIONS; ++i) {
             sink += i;
             log[INFO] << MSG;
         }
-        double sync_stream_ms = now_ms() - t0;
+        double enqueue_ms = now_ms() - t0;
+        log.flush();
+        double total_ms = now_ms() - t0;
 
-        std::cout.rdbuf(old_cout);
-        std::cerr.rdbuf(old_cerr);
-
-        std::cout << "[sync  / stream ] total: " << sync_stream_ms << " ms"
-                  << "   overhead vs baseline: " << (sync_stream_ms - baseline_ms) << " ms"
-                  << "   per-call: " << (sync_stream_ms / ITERATIONS * 1e6) << " ns\n";
+        std::cout << "[sync  / stream ] enqueue: " << enqueue_ms << " ms"
+                  << "   total: " << total_ms << " ms"
+                  << "   overhead vs baseline: " << (enqueue_ms - baseline_ms) << " ms"
+                  << "   per-call: " << (enqueue_ms / ITERATIONS * 1e6) << " ns\n";
     }
 
-    // ── 4. Filtered logger (min=ERROR, INFO is silenced) ─────────────────────
+    // ── 3. Async / string ─────────────────────────────────────────────────────
     {
-        log.set_min_level(ERROR);
+        remove_file(ASYNC_FILE);
+        Logger log(LoggerConfig{}.with_stdout(false).with_file(ASYNC_FILE).with_async().with_min_level(DEBUG));
 
         t0 = now_ms();
         for (int i = 0; i < ITERATIONS; ++i) {
             sink += i;
             log.info(MSG);
         }
-        double filtered_string_ms = now_ms() - t0;
+        // Stop the clock here — this is the producer hot-path cost.
+        double enqueue_ms = now_ms() - t0;
+        log.flush();  // drain worker; includes actual disk writes
+        double total_ms = now_ms() - t0;
 
-        log.set_min_level(INFO);  // restore
-
-        std::cout << "[filter/ string ] total: " << filtered_string_ms << " ms"
-                  << "   overhead vs baseline: " << (filtered_string_ms - baseline_ms) << " ms"
-                  << "   per-call: " << (filtered_string_ms / ITERATIONS * 1e6) << " ns\n";
+        std::cout << "[async / string ] enqueue: " << enqueue_ms << " ms"
+                  << "   total: " << total_ms << " ms"
+                  << "   overhead vs baseline: " << (enqueue_ms - baseline_ms) << " ms"
+                  << "   per-call: " << (enqueue_ms / ITERATIONS * 1e6) << " ns\n";
     }
 
-    // ── 5. Filtered stream API ────────────────────────────────────────────────
+    // ── 4. Async / stream ─────────────────────────────────────────────────────
     {
-        log.set_min_level(ERROR);
+        remove_file(ASYNC_FILE);
+        Logger log(LoggerConfig{}.with_stdout(false).with_file(ASYNC_FILE).with_async().with_min_level(DEBUG));
 
         t0 = now_ms();
         for (int i = 0; i < ITERATIONS; ++i) {
             sink += i;
             log[INFO] << MSG;
         }
-        double filtered_stream_ms = now_ms() - t0;
+        double enqueue_ms = now_ms() - t0;
+        log.flush();
+        double total_ms = now_ms() - t0;
 
-        log.set_min_level(RAW);
+        std::cout << "[async / stream ] enqueue: " << enqueue_ms << " ms"
+                  << "   total: " << total_ms << " ms"
+                  << "   overhead vs baseline: " << (enqueue_ms - baseline_ms) << " ms"
+                  << "   per-call: " << (enqueue_ms / ITERATIONS * 1e6) << " ns\n";
+    }
 
-        std::cout << "[filter/ stream ] total: " << filtered_stream_ms << " ms"
-                  << "   overhead vs baseline: " << (filtered_stream_ms - baseline_ms) << " ms"
-                  << "   per-call: " << (filtered_stream_ms / ITERATIONS * 1e6) << " ns\n";
+    // ── 5. Filter / string (sanity check — no file I/O) ───────────────────────
+    {
+        Logger log(LoggerConfig{}.with_stdout(false).with_min_level(ERROR));
+
+        t0 = now_ms();
+        for (int i = 0; i < ITERATIONS; ++i) {
+            sink += i;
+            log.info(MSG);
+        }
+        double enqueue_ms = now_ms() - t0;
+        double total_ms = enqueue_ms;  // nothing to flush
+
+        std::cout << "[filter/ string ] enqueue: " << enqueue_ms << " ms"
+                  << "   total: " << total_ms << " ms"
+                  << "   overhead vs baseline: " << (enqueue_ms - baseline_ms) << " ms"
+                  << "   per-call: " << (enqueue_ms / ITERATIONS * 1e6) << " ns\n";
+    }
+
+    // ── 6. Filter / stream ────────────────────────────────────────────────────
+    {
+        Logger log(LoggerConfig{}.with_stdout(false).with_min_level(ERROR));
+
+        t0 = now_ms();
+        for (int i = 0; i < ITERATIONS; ++i) {
+            sink += i;
+            log[INFO] << MSG;
+        }
+        double enqueue_ms = now_ms() - t0;
+        double total_ms = enqueue_ms;
+
+        std::cout << "[filter/ stream ] enqueue: " << enqueue_ms << " ms"
+                  << "   total: " << total_ms << " ms"
+                  << "   overhead vs baseline: " << (enqueue_ms - baseline_ms) << " ms"
+                  << "   per-call: " << (enqueue_ms / ITERATIONS * 1e6) << " ns\n";
     }
 
     // ── Summary ───────────────────────────────────────────────────────────────
     std::cout << "\n[baseline       ] total: " << baseline_ms << " ms"
               << "   (" << ITERATIONS << " iterations)\n";
-    std::cout << "(sink=" << sink << ")\n";  // prevent sink being optimised away
+    std::cout << "(sink=" << sink << ")\n";
+
+    remove_file(SYNC_FILE);
+    remove_file(ASYNC_FILE);
 
     return 0;
 }

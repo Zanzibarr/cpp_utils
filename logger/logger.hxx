@@ -221,6 +221,9 @@ class Logger {
             return *this;
         }
 
+        /// @warning If used with FATAL level, calls `_Exit()` after flushing this logger's streams.
+        /// Any other open streams or RAII resources in the process will NOT be cleaned up — destructors are not run.  Use only for truly
+        /// unrecoverable errors.
         ~log_stream() {
             if (moved_ || !active_) {
                 return;
@@ -294,11 +297,8 @@ class Logger {
     }
     /// Change the minimum level filter at runtime (lock-free).
     void set_min_level(level lvl) { min_level_.store(lvl, std::memory_order_relaxed); }
-    /// Enable or disable memory-usage stamping (thread-safe).
-    void set_memory(bool enabled) {
-        std::lock_guard lock(mutex_);
-        show_memory_ = enabled;
-    }
+    /// Enable or disable memory-usage stamping (lock-free).
+    void set_memory(bool enabled) { show_memory_.store(enabled, std::memory_order_relaxed); }
 
     /**
      * @brief Open (or switch to) a log file.  Can be called at any time.
@@ -331,7 +331,7 @@ class Logger {
     void flush() {
         if (async_mode_) {
             std::unique_lock lock(queue_mutex_);
-            queue_cv_.wait(lock, [this] { return queue_.empty(); });
+            queue_cv_.wait(lock, [this] { return queue_.empty() && in_flight_.load(std::memory_order_acquire) == 0; });
         }
         std::lock_guard lock(mutex_);
         std::cout.flush();
@@ -349,6 +349,9 @@ class Logger {
     void warning(std::string_view msg) { emit(msg, level::WARNING); }
     void debug(std::string_view msg) { emit(msg, level::DEBUG); }
     void error(std::string_view msg) { emit(msg, level::ERROR); }
+    /// @warning Calls `_Exit()` after flushing this logger's streams.
+    /// Any other open streams or RAII resources in the process will NOT be cleaned up — destructors are not run.  Use only for truly unrecoverable
+    /// errors.
     [[noreturn]] void fatal(std::string_view msg) {
         emit(msg, level::FATAL);
         flush();
@@ -363,6 +366,9 @@ class Logger {
     [[nodiscard]] auto warning() -> log_stream { return {this, level::WARNING}; }
     [[nodiscard]] auto debug() -> log_stream { return {this, level::DEBUG}; }
     [[nodiscard]] auto error() -> log_stream { return {this, level::ERROR}; }
+    /// @warning Calls `_Exit()` after flushing this logger's streams.
+    /// Any other open streams or RAII resources in the process will NOT be cleaned up — destructors are not run.  Use only for truly
+    /// unrecoverable errors.
     [[nodiscard]] auto fatal() -> log_stream { return {this, level::FATAL, true}; }
 
     /// Select a level via subscript: `lg[INFO] << "msg"`.
@@ -675,11 +681,14 @@ class Logger {
                 while (!queue_.empty()) {
                     record rec = std::move(queue_.front());
                     queue_.pop();
+                    in_flight_.fetch_add(1, std::memory_order_relaxed);
                     lock.unlock();
                     {
                         std::lock_guard writelock(mutex_);
                         write_record(rec);
                     }
+                    in_flight_.fetch_sub(1, std::memory_order_release);
+                    queue_cv_.notify_all();
                     lock.lock();
                 }
 
@@ -710,8 +719,9 @@ class Logger {
     bool to_stdout_ = true;
     bool use_colors_ = true;
     bool show_thread_ = true;
-    bool show_memory_ = false;
+    std::atomic<bool> show_memory_{false};
     bool async_mode_ = false;
+    std::atomic<int> in_flight_{0};
     std::atomic<level> min_level_{level::INFO};
 
     std::ofstream file_;
