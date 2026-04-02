@@ -8,82 +8,95 @@ Thread-safe logger with runtime level filtering, synchronous and asynchronous ou
 
 ## Log Levels
 
-`Logger::level::BASIC < DEBUG < INFO < SUCCESS < WARNING < ERROR`
+```
+DEBUG(0) < INFO(1) < WARNING(2) < RAW(3) < SUCCESS(4) < ERROR(5) < FATAL(6)
+```
 
-Only messages at or above the configured minimum level are emitted.
+Only messages at or above the configured minimum level are emitted. The default minimum is `INFO`.
 
-## Initialization
+## Construction
+
+All options are set via `LoggerConfig`, which uses a fluent builder style. All fields have sensible defaults.
 
 ```cpp
-// Sync, stdout only, colors auto-detected, thread-IDs shown
-log_init();
+// Defaults: sync, stdout, colors, thread-IDs, min_level=RAW
+Logger lg;
 
 // Async mode (background writer thread)
-log_init_async();
+Logger lg(LoggerConfig{}.with_async());
 
-// Log to file as well
-log_init_file("app.log");
+// Log to file as well as stdout
+Logger lg(LoggerConfig{}.with_file("app.log"));
 
 // Full control
-default_logger().initialize(
-    /*write_to_file*/ true,
-    /*file_path*/     "app.log",
-    /*use_colors*/    true,
-    /*show_thread*/   false,
-    /*async_mode*/    true,
-    /*min_level*/     Logger::level::INFO
-);
+Logger lg(LoggerConfig{}
+    .with_file("app.log")
+    .with_async()
+    .with_colors(false)
+    .with_thread(false)
+    .with_min_level(LoggerLevel::INFO));
 ```
 
-## Logging — Macros
+An externally-captured `steady_clock::time_point` can be passed as a second argument so that elapsed timestamps are measured from before the Logger was constructed.
 
-### Stream API (use `<<` to compose messages)
+## Logging API
+
+### Stream API — compose messages with `<<`
 
 ```cpp
-LOG        << "plain message";
-LOG_DEBUG  << "x = " << x << ", y = " << y;
-LOG_INFO   << "server started on port " << port;
-LOG_SUCCESS << "job done in " << elapsed << " ms";
-LOG_WARN   << "retrying after " << delay << " ms";
-LOG_ERROR  << "failed to open " << path;
+lg.log()     << "plain message";
+lg.debug()   << "x = " << x << ", y = " << y;
+lg.info()    << "server started on port " << port;
+lg.success() << "job done in " << elapsed << " ms";
+lg.warning() << "retrying after " << delay << " ms";
+lg.error()   << "failed to open " << path;
+lg.fatal()   << "unrecoverable error — exits after flush";
 ```
 
-### String API (no stream construction — slightly faster)
+Select a level dynamically via subscript:
 
 ```cpp
-LOG_S(msg)
-LOG_DEBUG_S(msg)
-LOG_INFO_S(msg)
-LOG_SUCCESS_S(msg)
-LOG_WARN_S(msg)
-LOG_ERROR_S(msg)
+lg[LoggerLevel::INFO] << "dynamic level";
 ```
 
-### Utility macros
+Stream directly at `RAW` level via `operator<<` on the logger itself:
 
 ```cpp
-LOG_HERE            // stamps current source file + line
-LOG_TODO(msg)       // LOG_WARN + marks unimplemented code
-LOG_TODO_WARN(msg)  // same at WARNING level
+lg << "raw message";
 ```
 
-## Direct API
+### String API — pass a pre-formatted `string_view`
 
 ```cpp
-Logger& logger = default_logger();
-
-logger.info("server started");
-logger.error("disk full");
-logger.log(Logger::level::SUCCESS, "OK");
-
-// Runtime controls
-logger.set_min_level(Logger::level::WARNING);
-logger.set_colors(false);
-logger.set_thread(true);
-
-// Flush async queue (no-op in sync mode)
-logger.flush();
+lg.log("plain message");
+lg.debug("checkpoint reached");
+lg.info("server started");
+lg.success("all tests passed");
+lg.warning("low disk space");
+lg.error("connection refused");
+lg.fatal("unrecoverable error");   // flushes and calls _Exit
 ```
+
+Both APIs have equivalent per-call cost. The stream path accumulates into a
+thread-local buffer (no allocation per call) and moves it into the log record;
+the string path copies from the `string_view`. See [Performance](#performance).
+
+## Runtime Controls
+
+```cpp
+lg.set_min_level(LoggerLevel::WARNING);  // lock-free atomic update
+lg.set_stdout(false);
+lg.set_colors(false);
+lg.set_thread(false);
+lg.set_memory(true);                     // prefix each line with RSS in KB
+
+lg.open_file("run.log");                 // add/switch file output
+lg.close_file();
+
+lg.flush();                              // in async mode, blocks until queue is drained
+```
+
+`set_config(LoggerConfig)` updates all options except `async` (constructor-only) in one call.
 
 ## Sync vs Async Mode
 
@@ -91,7 +104,7 @@ logger.flush();
 |--|------|-------|
 | Write timing | On calling thread | Background thread |
 | Mutex | Yes, per write | Only on queue push |
-| Call cost | ~188–326 ns | Lower (queuing only) |
+| Call cost | ~95–105 ns | Lower (queuing only) |
 | Ordering | Strict | FIFO via queue |
 | Use when | Simplicity, debugging | Low-latency hot paths |
 
@@ -99,22 +112,24 @@ In async mode, `flush()` blocks until the queue is drained.
 
 ## Filtering Cost
 
-When a message is below the minimum level, it is rejected before any allocation or formatting:
+When a message is below the minimum level it is rejected before any allocation or formatting:
 
 | API | Filtered cost |
 |-----|--------------|
-| String (`LOG_INFO_S`) | ~25 ns |
-| Stream (`LOG_INFO`) | ~3–4 ns |
+| String (`lg.info(msg)`) | ~3 ns |
+| Stream (`lg.info() << msg`) | ~1–2 ns |
 
-The stream variant is cheaper when filtered because `log_stream` destructs immediately without building a string.
+The stream variant is marginally cheaper when filtered because `log_stream` destructs immediately without touching the buffer.
 
 ## Output Format
 
 ```
-[HH:MM:SS.mmm] [LEVEL] [thread-id] message
+[HH:MM:SS.mmm] [NNNNNNN KB] [T:xxxx] [LEVEL  ] message
+               └─ memory ──┘ └─ tid ─┘
+               (optional)    (optional)
 ```
 
-Colors are applied per level when stdout is a TTY and colors are enabled.
+Colors are applied per level on the console; file output is always plain text.
 
 ## Performance
 
@@ -122,7 +137,7 @@ See [BENCHMARKS.md](../logger/BENCHMARKS.md) for full results.
 
 | Mode | Per-call cost |
 |------|--------------|
-| Sync / string | ~188 ns |
-| Sync / stream | ~326 ns |
-| Filtered / string | ~25 ns |
-| Filtered / stream | ~3–4 ns |
+| Sync / string | ~100 ns |
+| Sync / stream | ~95 ns |
+| Filtered / string | ~3 ns |
+| Filtered / stream | ~1–2 ns |

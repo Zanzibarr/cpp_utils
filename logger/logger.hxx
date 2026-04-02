@@ -3,7 +3,7 @@
 /**
  * @file logger.hxx
  * @brief Thread-safe logger with synchronous and asynchronous output modes.
- * @version 2.1.0
+ * @version 2.2.0
  *
  * @details
  * `Logger` supports two operating modes selected at construction:
@@ -34,7 +34,6 @@
 #include <fstream>
 #include <iostream>
 #include <mutex>
-#include <optional>
 #include <queue>
 #include <sstream>
 #include <stdexcept>
@@ -60,7 +59,7 @@
  * is.  The filter rule is simply `level >= min_level`:
  *
  *   min_level = DEBUG   → everything printed
- *   min_level = RAW     → RAW, SUCCESS, ERROR, FATAL  (default)
+ *   min_level = INFO    → INFO and above  (default)
  *   min_level = ERROR   → only ERROR and FATAL
  *
  * Ordering:  DEBUG(0) < INFO(1) < WARNING(2) < RAW(3) < SUCCESS(4) < ERROR(5) < FATAL(6)
@@ -78,13 +77,13 @@ enum class LoggerLevel : int { DEBUG = 0, INFO = 1, WARNING = 2, RAW = 3, SUCCES
  * @endcode
  */
 struct LoggerConfig {
-    bool to_stdout = true;                     ///< Write to stdout/stderr.
-    bool use_colors = true;                    ///< Emit ANSI escape codes on console.
-    bool show_thread = true;                   ///< Prefix each line with a short thread ID.
-    bool async = false;                        ///< Dispatch writes to a background thread.
-    std::string file_path;                     ///< Non-empty → open this file for plain-text output.
-    LoggerLevel min_level = LoggerLevel::RAW;  ///< Discard messages below this level.
-    bool show_memory = false;                  ///< Prefix each line with current RSS in KB.
+    bool to_stdout = true;                      ///< Write to stdout/stderr.
+    bool use_colors = true;                     ///< Emit ANSI escape codes on console.
+    bool show_thread = true;                    ///< Prefix each line with a short thread ID.
+    bool async = false;                         ///< Dispatch writes to a background thread.
+    std::string file_path;                      ///< Non-empty → open this file for plain-text output.
+    LoggerLevel min_level = LoggerLevel::INFO;  ///< Discard messages below this level.
+    bool show_memory = false;                   ///< Prefix each line with current RSS in KB.
 
     auto with_stdout(bool enabled = true) -> auto& {
         to_stdout = enabled;
@@ -131,6 +130,49 @@ struct LoggerConfig {
  *  - Runtime reconfiguration of all output options.
  */
 class Logger {
+    // ── Private stream helpers ────────────────────────────────────────────────
+    // Defined before log_stream so it can reference them.
+
+    /// Custom streambuf that appends directly into a `std::string&`.
+    /// Declared `final` to enable devirtualisation where the concrete type is visible.
+    class tl_log_buf final : public std::streambuf {
+        std::string* str_;
+
+       public:
+        explicit tl_log_buf(std::string& str) : str_(&str) {}
+
+        ~tl_log_buf() override = default;
+        tl_log_buf(const tl_log_buf&) = delete;
+        tl_log_buf(tl_log_buf&&) = delete;
+        auto operator=(const tl_log_buf&) -> tl_log_buf& = delete;
+        auto operator=(tl_log_buf&&) -> tl_log_buf& = delete;
+
+       protected:
+        auto xsputn(const char* data, std::streamsize n) -> std::streamsize override {
+            str_->append(data, static_cast<std::size_t>(n));
+            return n;
+        }
+        auto overflow(int chr) -> int override {
+            if (chr != traits_type::eof()) {
+                str_->push_back(static_cast<char>(chr));
+            }
+            return chr;
+        }
+    };
+
+    /// Thread-local state reused by every `log_stream` on a given thread.
+    /// Declaration order (buf → sbuf → stream) guarantees correct initialisation.
+    struct tl_stream_state {
+        std::string buf;
+        tl_log_buf sbuf{buf};
+        std::ostream stream{&sbuf};
+    };
+
+    static auto get_tl_stream() -> tl_stream_state& {
+        thread_local tl_stream_state state;
+        return state;
+    }
+
    public:
     /// Alias so `Logger::level::DEBUG` etc. work at call sites.
     using level = LoggerLevel;
@@ -143,6 +185,9 @@ class Logger {
      * @brief RAII stream wrapper — accumulates tokens via `operator<<` and
      *        flushes the full message to the Logger on destruction.
      *
+     * Internally backed by a thread-local buffer, so construction is allocation-free
+     * and the completed message is moved (not copied) into the log record on flush.
+     *
      * @code
      *   lg.info() << "Value = " << x;   // temporary log_stream, flushed at `;`
      * @endcode
@@ -152,12 +197,13 @@ class Logger {
         log_stream(Logger* logger_ptr, level lvl, bool exit_on_error = false)
             : lg_(logger_ptr), level_(lvl), exit_on_error_(exit_on_error), active_(lvl >= logger_ptr->min_level_.load(std::memory_order_relaxed)) {
             if (active_) {
-                buf_.emplace();  // eager init — eliminates branch on every operator<<
+                state_ = &Logger::get_tl_stream();
+                state_->buf.clear();
             }
         }
 
         log_stream(log_stream&& other) noexcept
-            : lg_(other.lg_), level_(other.level_), buf_(std::move(other.buf_)), exit_on_error_(other.exit_on_error_), active_(other.active_) {
+            : lg_(other.lg_), level_(other.level_), state_(other.state_), exit_on_error_(other.exit_on_error_), active_(other.active_) {
             other.moved_ = true;
         }
 
@@ -168,7 +214,7 @@ class Logger {
         template <typename T>
         auto operator<<(const T& val) -> log_stream& {
             if (active_) {
-                *buf_ << val;
+                state_->stream << val;
             }
             return *this;
         }
@@ -177,12 +223,11 @@ class Logger {
             if (moved_ || !active_) {
                 return;
             }
-            std::string msg = buf_->str();
-            if (!msg.empty()) {
-                lg_->emit(msg, level_);
+            if (!state_->buf.empty()) {
+                lg_->emit_owned(std::move(state_->buf), level_);
             }
             if (exit_on_error_ && level_ == level::FATAL) {
-                lg_->flush();  // drain queue before exiting so the fatal message is printed
+                lg_->flush();
                 _Exit(EXIT_FAILURE);
             }
         }
@@ -190,10 +235,10 @@ class Logger {
        private:
         Logger* lg_;
         level level_;
-        std::optional<std::ostringstream> buf_;
+        tl_stream_state* state_ = nullptr;
         bool exit_on_error_ = false;
         bool moved_ = false;
-        bool active_;  // false → operator<< and emit are no-ops
+        bool active_;
     };
 
     // ── Construction ──────────────────────────────────────────────────────────
@@ -594,6 +639,28 @@ class Logger {
         }
     }
 
+    // ── emit_owned ────────────────────────────────────────────────────────────
+
+    void emit_owned(std::string msg, level lvl) {
+        if (lvl < min_level_.load(std::memory_order_relaxed)) {
+            return;
+        }
+        double elapsed_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_).count();
+        long mem_kb = show_memory_ ? current_memory_kb() : -1L;
+        record rec{.message = std::move(msg), .lvl = lvl, .elapsed = elapsed_s, .thread_id = current_thread_tag(), .memory_kb = mem_kb};
+
+        if (async_mode_) {
+            {
+                std::lock_guard lock(queue_mutex_);
+                queue_.push(std::move(rec));
+            }
+            queue_cv_.notify_one();
+        } else {
+            std::lock_guard lock(mutex_);
+            write_record(rec);
+        }
+    }
+
     // ── Async worker ──────────────────────────────────────────────────────────
 
     void start_worker() {
@@ -643,7 +710,7 @@ class Logger {
     bool show_thread_ = true;
     bool show_memory_ = false;
     bool async_mode_ = false;
-    std::atomic<level> min_level_{level::RAW};
+    std::atomic<level> min_level_{level::INFO};
 
     std::ofstream file_;
 

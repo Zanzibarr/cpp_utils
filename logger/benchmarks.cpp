@@ -105,7 +105,7 @@ auto main() -> int {
         }
         double filtered_string_ms = now_ms() - t0;
 
-        log.set_min_level(RAW);  // restore
+        log.set_min_level(INFO);  // restore
 
         std::cout << "[filter/ string ] total: " << filtered_string_ms << " ms"
                   << "   overhead vs baseline: " << (filtered_string_ms - baseline_ms) << " ms"
