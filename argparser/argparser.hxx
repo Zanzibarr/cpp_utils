@@ -29,6 +29,8 @@
  * @author Matteo Zanella <matteozanella2@gmail.com>
  * Copyright 2026 Matteo Zanella
  *
+ * Repository: https://github.com/Zanzibarr/cpp_utils
+ *
  * SPDX-License-Identifier: MIT
  */
 

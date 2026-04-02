@@ -29,6 +29,8 @@
  * @author Matteo Zanella <matteozanella2@gmail.com>
  * Copyright 2026 Matteo Zanella
  *
+ * Repository: https://github.com/Zanzibarr/cpp_utils
+ *
  * SPDX-License-Identifier: MIT
  */
 
@@ -66,8 +68,7 @@ using time_point = clock::time_point;
 // Accepts any std::chrono::duration specialization (not just the four named ones).
 template <typename D>
 concept ValidDuration =
-    std::is_same_v<D, std::chrono::duration<typename D::rep, typename D::period>> &&
-    std::ratio_less_equal<typename D::period, std::ratio<60>>::value;
+    std::is_same_v<D, std::chrono::duration<typename D::rep, typename D::period>> && std::ratio_less_equal<typename D::period, std::ratio<60>>::value;
 
 // Convert a raw nanosecond double to the requested Duration.
 template <ValidDuration D>
@@ -719,11 +720,17 @@ class TimerRegistry {
 
     // ── Deprecated aliases (use the totals_* names above) ─────────────────
     template <timer_detail::ValidDuration D = std::chrono::milliseconds>
-    [[nodiscard, deprecated("use get_totals_report()")]] auto get_report() const { return get_totals_report<D>(); }
+    [[nodiscard, deprecated("use get_totals_report()")]] auto get_report() const {
+        return get_totals_report<D>();
+    }
     template <timer_detail::ValidDuration D = std::chrono::milliseconds>
-    [[nodiscard, deprecated("use totals_report_to_str()")]] auto report_to_str() const { return totals_report_to_str<D>(); }
+    [[nodiscard, deprecated("use totals_report_to_str()")]] auto report_to_str() const {
+        return totals_report_to_str<D>();
+    }
     template <timer_detail::ValidDuration D = std::chrono::milliseconds>
-    [[deprecated("use print_totals_report()")]] void print_report() const { print_totals_report<D>(); }
+    [[deprecated("use print_totals_report()")]] void print_report() const {
+        print_totals_report<D>();
+    }
 
     [[nodiscard]] auto stats_report_to_str() const -> std::string {
         std::stringstream ost;
