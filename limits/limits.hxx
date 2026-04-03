@@ -2,26 +2,21 @@
 
 /**
  * @file limits.hxx
- * @brief Cooperative time limits and process memory limits.
- * @version 1.0.0
+ * @brief Cooperative time limits and memory limits.
+ * @version 3.0.1
  *
  * @details
- * **Time limiting** — two classes in namespace `timelim`:
- *   - `LocalTimeLimiter` — scoped, per-instance expiry state.  Safe to
- *     instantiate multiple times concurrently; each has its own background
- *     thread that polls at 50 ms intervals.  `expired()` returns true when
- *     either this limiter or the global limit has fired.
- *   - `GlobalTimeLimiter` — process-wide singleton that writes the inline
- *     `GLOBAL_TERMINATE_CONDITION` atomic on expiry.  The macro
- *     `LIMITS_CHECK_STOP()` reads this flag cheaply (relaxed load) from
- *     anywhere in the codebase.
+ * Two self-contained limiter classes — `TimeLimiter` and `MemoryLimiter` —
+ * each with an independent background polling thread.
  *
- * Convenience free functions `set_time_limit(seconds)` and
- * `cancel_time_limit()` operate on the `timelim::global_limiter` instance.
+ * **Global limits** are a special case: convenience free functions
+ * (`set_time_limit`, `set_memory_limit`, …) operate on process-wide singleton
+ * instances whose callbacks write `global_limits::time_flag` /
+ * `global_limits::memory_flag`.  Poll those flags cheaply with
+ * `global_limits::time_reached()` / `global_limits::memory_reached()` from anywhere.
  *
- * **Memory limiting** — `memlim::set_memory_limit(mb)` calls `setrlimit`
- * with `RLIMIT_AS`.  On macOS the kernel silently ignores this syscall;
- * the function prints a warning and returns `false`.
+ * **Local limits** are plain stack objects.  Give them a callback if you want
+ * a notification, or just poll `expired()` / `exceeded()`.
  *
  * @author Matteo Zanella <matteozanella2@gmail.com>
  * Copyright 2026 Matteo Zanella
@@ -31,69 +26,87 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <sys/resource.h>
-
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <functional>
-#include <iostream>
+#include <mutex>
 #include <thread>
 
-// Written by the global TimeLimiter only. Read via LIMITS_CHECK_STOP().
-inline std::atomic<int> GLOBAL_TERMINATE_CONDITION{0};
-#define LIMITS_CHECK_STOP() GLOBAL_TERMINATE_CONDITION.load(std::memory_order_relaxed)
+#ifdef __APPLE__
+#include <mach/mach.h>
+#else
+#include <unistd.h>
 
-namespace timelim {
+#include <fstream>
+#endif
+
+// ── TimeLimiter ───────────────────────────────────────────────────────────────
 
 /**
- * Scoped time limiter with independent per-instance expiry state.
+ * Cooperative time limiter backed by a single background thread.
  *
- * Starts a background polling thread on `set()` and joins it on `cancel()`
- * or destruction.  Multiple instances may run concurrently without interference.
+ * `expired()` is sticky: once true it never reverts, even if `cancel()` is
+ * called afterwards.
+ *
+ * Usage — local:
+ * @code
+ *   TimeLimiter lim;
+ *   lim.set(3s, []{ std::cerr << "time's up\n"; });
+ *   while (!lim.expired()) { ... }
+ * @endcode
+ *
+ * Usage — global (via free functions):
+ * @code
+ *   set_time_limit(5);
+ *   while (!LIMITS_CHECK_STOP()) { ... }
+ *   cancel_time_limit();
+ * @endcode
  */
-class LocalTimeLimiter {
+class [[nodiscard]] TimeLimiter {
    public:
     using Clock = std::chrono::steady_clock;
     using Callback = std::function<void()>;
-    static constexpr int POLL_INTERVAL_MS = 50;
 
-    LocalTimeLimiter() = default;
-    ~LocalTimeLimiter() { cancel(); }
+    TimeLimiter() = default;
+    ~TimeLimiter() { cancel(); }
 
-    LocalTimeLimiter(const LocalTimeLimiter&) = delete;
-    auto operator=(const LocalTimeLimiter&) -> LocalTimeLimiter& = delete;
-    LocalTimeLimiter(LocalTimeLimiter&&) = delete;
-    auto operator=(LocalTimeLimiter&&) -> LocalTimeLimiter& = delete;
+    TimeLimiter(const TimeLimiter&) = delete;
+    auto operator=(const TimeLimiter&) -> TimeLimiter& = delete;
+    TimeLimiter(TimeLimiter&&) = delete;
+    auto operator=(TimeLimiter&&) -> TimeLimiter& = delete;
 
     /**
-     * Starts the timer.  Cancels any previously running timer first.
+     * Arms the timer.  Cancels any previously running timer first.
      *
      * @param duration   How long until expiry.
-     * @param on_expire  Optional callback invoked from the polling thread on expiry.
+     * @param on_expire  Called from the background thread on expiry (optional).
      */
     void set(std::chrono::seconds duration, Callback on_expire = nullptr) {
         cancel();
-        expired_.store(false, std::memory_order_release);
         on_expire_ = std::move(on_expire);
 
-        thread_ = std::jthread([this, deadline = Clock::now() + duration](std::stop_token tok) -> void {
-            while (Clock::now() < deadline) {
-                if (tok.stop_requested()) {
-                    return;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(POLL_INTERVAL_MS));
+        thread_ = std::jthread{[this, deadline = Clock::now() + duration](std::stop_token stop) {
+            std::unique_lock lock{cv_mutex_};
+            cv_.wait_until(lock, stop, deadline, [] { return false; });
+
+            if (stop.stop_requested()) {
+                return;
             }
-            if (!tok.stop_requested()) {
-                expired_.store(true, std::memory_order_release);
-                if (on_expire_) {
-                    on_expire_();
-                }
+
+            expired_.store(true, std::memory_order_release);
+            if (on_expire_) {
+                on_expire_();
             }
-        });
+        }};
     }
 
-    /** Stops the timer; blocks until the polling thread exits. */
+    /**
+     * Disarms the timer.  Blocks until the background thread exits.
+     * Does NOT reset `expired_` — if the timer fired naturally that state
+     * is preserved and `expired()` will keep returning true.
+     */
     void cancel() {
         if (thread_.joinable()) {
             thread_.request_stop();
@@ -102,167 +115,219 @@ class LocalTimeLimiter {
     }
 
     /**
-     * Returns `true` if this limiter expired **or** the global limit fired.
-     * Checking only this is sufficient — no need to also call `LIMITS_CHECK_STOP()`.
+     * Returns true if this limiter has expired.  Sticky: never reverts to
+     * false after returning true.
      */
-    [[nodiscard]] auto expired() const noexcept -> bool { return expired_.load(std::memory_order_acquire) || LIMITS_CHECK_STOP(); }
+    [[nodiscard]] auto expired() const noexcept -> bool { return expired_.load(std::memory_order_acquire); }
 
    private:
     std::atomic<bool> expired_{false};
     std::jthread thread_;
     Callback on_expire_;
+    std::condition_variable_any cv_;
+    std::mutex cv_mutex_;
 };
 
-/**
- * Process-wide time limiter that writes `GLOBAL_TERMINATE_CONDITION` on expiry.
- *
- * Intended as a singleton (`timelim::global_limiter`).  When the global limit
- * fires, `LIMITS_CHECK_STOP()` becomes non-zero everywhere in the program
- * without any handle passing.
- */
-class GlobalTimeLimiter {
-   public:
-    using Clock = std::chrono::steady_clock;
-    using Callback = std::function<void()>;
-    static constexpr int POLL_INTERVAL_MS = 50;
-
-    GlobalTimeLimiter() = default;
-    ~GlobalTimeLimiter() { cancel(); }
-
-    GlobalTimeLimiter(const GlobalTimeLimiter&) = delete;
-    GlobalTimeLimiter(GlobalTimeLimiter&&) = delete;
-    auto operator=(const GlobalTimeLimiter&) -> GlobalTimeLimiter& = delete;
-    auto operator=(GlobalTimeLimiter&&) -> GlobalTimeLimiter& = delete;
-
-    /**
-     * Starts the global timer.  Resets `GLOBAL_TERMINATE_CONDITION` and
-     * cancels any previously running timer first.
-     *
-     * @param duration   How long until the process-wide limit fires.
-     * @param on_expire  Optional callback invoked from the polling thread on expiry.
-     */
-    void set(std::chrono::seconds duration, Callback on_expire = nullptr) {
-        cancel();
-        GLOBAL_TERMINATE_CONDITION.store(0, std::memory_order_release);
-        on_expire_ = std::move(on_expire);
-
-        thread_ = std::jthread([this, deadline = Clock::now() + duration](std::stop_token tok) -> void {
-            while (Clock::now() < deadline) {
-                if (tok.stop_requested()) {
-                    return;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(POLL_INTERVAL_MS));
-            }
-            if (!tok.stop_requested()) {
-                GLOBAL_TERMINATE_CONDITION.store(1, std::memory_order_release);
-                if (on_expire_) {
-                    on_expire_();
-                }
-            }
-        });
-    }
-
-    /** Stops the timer and resets `GLOBAL_TERMINATE_CONDITION` to 0. */
-    void cancel() {
-        if (thread_.joinable()) {
-            thread_.request_stop();
-            thread_.join();
-        }
-        GLOBAL_TERMINATE_CONDITION.store(0, std::memory_order_release);
-    }
-
-    /** Returns `true` if the global limit has fired. */
-    static auto expired() noexcept -> bool { return GLOBAL_TERMINATE_CONDITION.load(std::memory_order_acquire) != 0; }
-
-   private:
-    std::jthread thread_;
-    Callback on_expire_;
-};
-
-// Process-wide instance
-inline GlobalTimeLimiter global_limiter;
-
-/**
- * Starts the process-wide time limit.
- * @param seconds    Limit duration in seconds.
- * @param on_expire  Optional callback invoked on the polling thread when time runs out.
- */
-inline void set_time_limit(unsigned int seconds, GlobalTimeLimiter::Callback on_expire = nullptr) {
-    global_limiter.set(std::chrono::seconds{seconds}, std::move(on_expire));
-}
-
-/** Cancels the process-wide time limit and resets `GLOBAL_TERMINATE_CONDITION`. */
-inline void cancel_time_limit() { global_limiter.cancel(); }
-
-}  // namespace timelim
+// ── Memory helpers ────────────────────────────────────────────────────────────
 
 namespace memlim {
 
 constexpr std::size_t BYTES_PER_MB = 1024ULL * 1024ULL;
 
 /**
- * Sets the virtual address space limit for the process via `setrlimit(RLIMIT_AS)`.
- *
- * The requested limit is silently clamped to the OS hard cap if necessary.
- * On macOS the syscall is a no-op (the kernel rejects it); a warning is
- * printed and `false` is returned.
- *
- * @param limit_mb  Desired limit in mebibytes.
- * @return `true` on success, `false` if the syscall failed or the platform
- *         does not support memory limits.
+ * Returns the current RSS / physical footprint in bytes, or 0 on failure.
+ * Callers must treat 0 as "unknown" and skip threshold comparisons.
  */
-[[nodiscard]]
-inline auto set_memory_limit(std::size_t limit_mb) -> bool {
+[[nodiscard]] inline auto current_memory_bytes() noexcept -> std::size_t {
 #ifdef __APPLE__
-    // macOS kernels (10.12+) unconditionally reject setrlimit for memory
-    // resources with EINVAL regardless of value or resource type. There is
-    // no user-space workaround without a kernel extension. The call is a
-    // no-op on this platform.
-    (void)limit_mb;
-    std::cerr << "[memlim] memory limits are not enforceable on macOS "
-                 "(kernel ignores setrlimit for RLIMIT_AS/DATA/RSS)\n";
-    return false;
+    task_vm_info_data_t info{};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS) {
+        return static_cast<std::size_t>(info.phys_footprint);
+    }
+    return 0;
 #else
-    const rlim_t requested = static_cast<rlim_t>(limit_mb) * BYTES_PER_MB;
-
-    rlimit cur{};
-    if (getrlimit(RLIMIT_AS, &cur) != 0) {
-        std::cerr << "[WARNING] getrlimit failed: " << std::strerror(errno) << '\n';
-        return false;
+    std::ifstream f{"/proc/self/statm"};
+    long resident{};
+    if (long total{}; f >> total >> resident) {
+        return static_cast<std::size_t>(resident) * static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
     }
-
-    // Never raise above the hard cap — setrlimit returns EPERM if we try.
-    const rlim_t effective = (cur.rlim_max == RLIM_INFINITY) ? requested : std::min(requested, cur.rlim_max);
-
-    if (effective < requested) {
-        std::cerr << "[memlim] clamped to OS hard cap: " << (effective / BYTES_PER_MB) << " MB"
-                  << " (requested " << limit_mb << " MB)\n";
-    }
-
-    const rlimit rlim{.rlim_cur = effective, .rlim_max = effective};
-    if (setrlimit(RLIMIT_AS, &rlim) != 0) {
-        std::cerr << "[WARNING] setrlimit failed (" << (effective / BYTES_PER_MB) << " MB): " << std::strerror(errno) << '\n';
-        return false;
-    }
-    return true;
+    return 0;
 #endif
 }
 
 /**
- * Returns the current virtual address space soft limit in bytes, or `-1` if
- * it cannot be determined (always `-1` on macOS).
+ * Returns the current RSS in bytes, or -1 on failure.
  */
-[[nodiscard]]
-inline std::ptrdiff_t current_memory_usage() noexcept {
-#ifdef __APPLE__
-    return -1;
-#else
-    rlimit rlim{};
-    if (getrlimit(RLIMIT_AS, &rlim) != 0) {
-        return -1;
-    }
-    return static_cast<std::ptrdiff_t>(rlim.rlim_cur);
-#endif
+[[nodiscard]] inline auto current_memory_usage() noexcept -> std::ptrdiff_t {
+    const auto bytes = current_memory_bytes();
+    return bytes > 0 ? static_cast<std::ptrdiff_t>(bytes) : -1;
 }
 
 }  // namespace memlim
+
+// ── MemoryLimiter ─────────────────────────────────────────────────────────────
+
+/**
+ * Cooperative RSS memory limiter backed by a single background thread.
+ *
+ * `exceeded()` is sticky: once true it never reverts.
+ *
+ * **Note on multi-threaded use:** the underlying measurement is process-wide
+ * RSS.  There is no per-thread memory accounting at the OS level, so multiple
+ * concurrent `MemoryLimiter` instances all observe the same number.
+ *
+ * Usage — local:
+ * @code
+ *   MemoryLimiter mlim;
+ *   mlim.set(256, []{ std::cerr << "memory exceeded\n"; });
+ *   while (!mlim.exceeded()) { ... }
+ * @endcode
+ *
+ * Usage — global (via free functions):
+ * @code
+ *   set_memory_limit(512);
+ *   while (!LIMITS_CHECK_MEMORY()) { ... }
+ *   cancel_memory_limit();
+ * @endcode
+ */
+class [[nodiscard]] MemoryLimiter {
+   public:
+    using Callback = std::function<void()>;
+    static constexpr auto POLL_INTERVAL = std::chrono::milliseconds{100};
+
+    MemoryLimiter() = default;
+    ~MemoryLimiter() { cancel(); }
+
+    MemoryLimiter(const MemoryLimiter&) = delete;
+    auto operator=(const MemoryLimiter&) -> MemoryLimiter& = delete;
+    MemoryLimiter(MemoryLimiter&&) = delete;
+    auto operator=(MemoryLimiter&&) -> MemoryLimiter& = delete;
+
+    /**
+     * Arms the monitor.  Cancels any previously running monitor first.
+     *
+     * @param limit_mb   Threshold in megabytes.  Must be > 0.
+     * @param on_exceed  Called from the polling thread on first breach (optional).
+     */
+    void set(std::size_t limit_mb, Callback on_exceed = nullptr) {
+        cancel();
+        on_exceed_ = std::move(on_exceed);
+        const std::size_t limit_bytes = limit_mb * memlim::BYTES_PER_MB;
+
+        thread_ = std::jthread{[this, limit_bytes](std::stop_token stop) {
+            while (!stop.stop_requested()) {
+                {
+                    std::unique_lock lock{cv_mutex_};
+                    cv_.wait_for(lock, stop, POLL_INTERVAL, [] { return false; });
+                }
+
+                if (stop.stop_requested()) {
+                    return;
+                }
+
+                const auto bytes = memlim::current_memory_bytes();
+                if (bytes == 0) {
+                    continue;  // sampling failure — skip
+                }
+
+                if (bytes >= limit_bytes) {
+                    exceeded_.store(true, std::memory_order_release);
+                    if (on_exceed_) {
+                        on_exceed_();
+                    }
+                    return;
+                }
+            }
+        }};
+    }
+
+    /**
+     * Disarms the monitor.  Blocks until the polling thread exits.
+     * Does NOT reset `exceeded_` — naturally-fired state is preserved.
+     */
+    void cancel() {
+        if (thread_.joinable()) {
+            thread_.request_stop();
+            thread_.join();
+        }
+    }
+
+    /**
+     * Returns true if the RSS threshold has been breached.  Sticky: never
+     * reverts to false after returning true.
+     */
+    [[nodiscard]] auto exceeded() const noexcept -> bool { return exceeded_.load(std::memory_order_acquire); }
+
+   private:
+    std::atomic<bool> exceeded_{false};
+    std::jthread thread_;
+    Callback on_exceed_;
+    std::condition_variable_any cv_;
+    std::mutex cv_mutex_;
+};
+
+// ── Global singletons and free functions ──────────────────────────────────────
+
+namespace global_limits {
+
+/// Global flag atomics
+inline std::atomic<bool> time_flag{false};
+inline std::atomic<bool> memory_flag{false};
+
+/// The global TimeLimiter: its callback writes global_limits::time_flag.
+inline TimeLimiter global_time_limiter;
+
+/// The global MemoryLimiter: its callback writes global_limits::memory_flag.
+inline MemoryLimiter global_memory_limiter;
+
+/// Cheap relaxed read of the global time flag.  Use inside tight loops.
+inline auto time_reached() { return global_limits::time_flag.load(std::memory_order_relaxed); }
+/// Cheap relaxed read of the global memory flag.  Use inside tight loops.
+inline auto memory_reached() { return global_limits::memory_flag.load(std::memory_order_relaxed); }
+
+}  // namespace global_limits
+
+/**
+ * Arms the process-wide time limit.
+ * On expiry, sets `global_limits::time_flag` (readable via `global_limits::time_reached()`).
+ *
+ * @param seconds    Limit duration.
+ * @param on_expire  Extra callback on expiry alongside the flag write (optional).
+ */
+inline void set_time_limit(unsigned int seconds, TimeLimiter::Callback on_expire = nullptr) {
+    global_limits::global_time_limiter.set(std::chrono::seconds{seconds}, [cb = std::move(on_expire)] {
+        global_limits::time_flag.store(true, std::memory_order_release);
+        if (cb) {
+            cb();
+        }
+    });
+}
+
+/**
+ * Disarms the process-wide time limit.
+ * Does NOT reset `global_limits::time_flag` if it already fired.
+ */
+inline void cancel_time_limit() { global_limits::global_time_limiter.cancel(); }
+
+/**
+ * Arms the process-wide memory limit.
+ * On breach, sets `global_limits::memory_flag` (readable via `global_limits::memory_reached()`).
+ *
+ * @param limit_mb   Threshold in megabytes.
+ * @param on_exceed  Extra callback on breach alongside the flag write (optional).
+ */
+inline void set_memory_limit(std::size_t limit_mb, MemoryLimiter::Callback on_exceed = nullptr) {
+    global_limits::global_memory_limiter.set(limit_mb, [cb = std::move(on_exceed)] {
+        global_limits::memory_flag.store(true, std::memory_order_release);
+        if (cb) {
+            cb();
+        }
+    });
+}
+
+/**
+ * Disarms the process-wide memory limit.
+ * Does NOT reset `global_limits::memory_flag` if it already fired.
+ */
+inline void cancel_memory_limit() { global_limits::global_memory_limiter.cancel(); }

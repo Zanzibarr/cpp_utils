@@ -2,8 +2,8 @@
 //
 // Scenario: a program that downloads and processes a list of files.
 //   - A global time limit caps the entire run (e.g. a CI job timeout)
-//   - Each file gets its own local time limit (e.g. per-task deadline)
-//   - A memory limit protects against runaway allocations
+//   - Each file gets its own local time limit (per-task deadline)
+//   - A global memory limit monitors for runaway allocations
 //
 // The interesting cases this shows:
 //   1. A file finishes processing within its local limit   → OK
@@ -34,13 +34,14 @@ std::string elapsed() {
 }
 
 // Simulates processing work that takes between min_ms and max_ms milliseconds.
-// Checks the local limiter periodically so it can abort early if needed.
-bool process_chunk(timelim::LocalTimeLimiter& limiter, int min_ms, int max_ms) {
+// Checks the local limiter and global flags periodically to abort early if needed.
+bool process_chunk(TimeLimiter& limiter, int min_ms, int max_ms) {
     auto chunk_time = std::uniform_int_distribution{min_ms, max_ms}(rng);
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(chunk_time);
 
     while (std::chrono::steady_clock::now() < deadline) {
-        if (limiter.expired()) return false;  // aborted — local or global fired
+        if (limiter.expired() || global_limits::time_reached() || global_limits::memory_reached())
+            return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     return true;
@@ -56,20 +57,19 @@ struct File {
 // Processes one file under a local time limit.
 // Returns true if the file was fully processed before any timeout.
 bool process_file(const File& file, std::chrono::seconds local_limit) {
-    timelim::LocalTimeLimiter local;
+    TimeLimiter local;
 
-    local.set(local_limit, [&] {
-        // Fired from the timer thread when the local limit expires.
-        // Keep this minimal — just flag it; the main thread reads expired().
-    });
+    local.set(local_limit);  // no callback needed — just poll expired()
 
     std::cout << std::format("  [{}]  processing {}  (limit: {}s) ...\n", elapsed(), file.name, local_limit.count());
 
     // Simulate processing in 3 chunks.
     for (int chunk = 1; chunk <= 3; ++chunk) {
         if (!process_chunk(local, file.processing_ms / 3, file.processing_ms / 2)) {
-            if (LIMITS_CHECK_STOP())
-                std::cout << std::format("  [{}]  {} — STOPPED (global limit reached)\n", elapsed(), file.name);
+            if (global_limits::time_reached())
+                std::cout << std::format("  [{}]  {} — STOPPED (global time limit reached)\n", elapsed(), file.name);
+            else if (global_limits::memory_reached())
+                std::cout << std::format("  [{}]  {} — STOPPED (global memory limit exceeded)\n", elapsed(), file.name);
             else
                 std::cout << std::format("  [{}]  {} — TIMED OUT (exceeded {}s local limit)\n", elapsed(), file.name, local_limit.count());
             return false;
@@ -97,9 +97,15 @@ int main() {
 
     constexpr auto GLOBAL_LIMIT = std::chrono::seconds{8};
     constexpr auto LOCAL_LIMIT = std::chrono::seconds{2};
-    constexpr int MEMORY_LIMIT_MB = 512;
+    constexpr std::size_t MEMORY_LIMIT_MB = 2048;  // high threshold — just for demo
 
     // ── setup ────────────────────────────────────────────────────────────────
+
+    // Show current RSS so the memory limit is meaningful.
+    const auto rss = memlim::current_memory_usage();
+    const std::string rss_str = (rss > 0)
+        ? std::format("{} MB", rss / static_cast<std::ptrdiff_t>(memlim::BYTES_PER_MB))
+        : "unknown";
 
     std::cout << std::format(
         "limits.hxx demo\n"
@@ -107,14 +113,20 @@ int main() {
         "  files to process : {}\n"
         "  global time limit: {}s  (entire run)\n"
         "  local time limit : {}s  (per file)\n"
-        "  memory limit     : {} MB\n"
+        "  memory limit     : {} MB  (current RSS: {})\n"
         "───────────────────────────────────────────\n\n",
-        files.size(), GLOBAL_LIMIT.count(), LOCAL_LIMIT.count(), MEMORY_LIMIT_MB);
+        files.size(), GLOBAL_LIMIT.count(), LOCAL_LIMIT.count(), MEMORY_LIMIT_MB, rss_str);
 
-    if (memlim::set_memory_limit(MEMORY_LIMIT_MB)) std::cout << std::format("  [{}]  memory capped at {} MB\n\n", elapsed(), MEMORY_LIMIT_MB);
+    // Global memory limit: fires a callback and sets global_limits::memory_flag.
+    set_memory_limit(MEMORY_LIMIT_MB, [&] {
+        std::cout << std::format(
+            "\n  [{}]  *** global memory limit exceeded — "
+            "aborting remaining work ***\n\n",
+            elapsed());
+    });
 
-    // The global limit: if the entire run exceeds this, stop everything.
-    timelim::set_time_limit(static_cast<unsigned>(GLOBAL_LIMIT.count()), [&] {
+    // Global time limit: fires a callback and sets global_limits::time_flag.
+    set_time_limit(static_cast<unsigned>(GLOBAL_LIMIT.count()), [&] {
         std::cout << std::format(
             "\n  [{}]  *** global time limit reached — "
             "aborting remaining work ***\n\n",
@@ -126,7 +138,7 @@ int main() {
     int ok = 0, timed_out = 0, aborted = 0;
 
     for (const auto& file : files) {
-        if (LIMITS_CHECK_STOP()) {
+        if (global_limits::time_reached() || global_limits::memory_reached()) {
             std::cout << std::format("  [{}]  skipping {} (global limit already reached)\n", elapsed(), file.name);
             ++aborted;
             continue;
@@ -136,13 +148,14 @@ int main() {
 
         if (success)
             ++ok;
-        else if (LIMITS_CHECK_STOP())
+        else if (global_limits::time_reached() || global_limits::memory_reached())
             ++aborted;
         else
             ++timed_out;
     }
 
-    timelim::cancel_time_limit();
+    cancel_time_limit();
+    cancel_memory_limit();
 
     // ── summary ──────────────────────────────────────────────────────────────
 
