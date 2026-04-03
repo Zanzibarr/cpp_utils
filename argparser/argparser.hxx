@@ -302,8 +302,8 @@ class ArgParser {
         return reg_.get<Name, T>();
     }
 
-    /** Returns the underlying `ParameterRegistry` populated by `parse()`. */
-    [[nodiscard]] auto parameters() const -> const ParameterRegistry& { return reg_; }
+    /** Returns a copy of the `ParameterRegistry` populated by `parse()`. */
+    [[nodiscard]] auto parameters() const -> ParameterRegistry { return reg_; }
 
     // ── help ───────────────────────────────────────────────────────────
 
