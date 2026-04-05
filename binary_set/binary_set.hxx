@@ -311,6 +311,13 @@ class BinarySet {
      */
     [[nodiscard]] auto empty() const noexcept -> bool { return size_ == 0; }
 
+    /**
+     * @brief Tests whether the set is full (size() == capacity()).
+     *
+     * O(1) — uses the cached size counter.
+     */
+    [[nodiscard]] auto full() const noexcept -> bool { return size_ == capacity_; }
+
     // ───────────────────────────────────────────────────────────────────────
     // Bulk conversion
     // ───────────────────────────────────────────────────────────────────────
