@@ -3,7 +3,7 @@
 /**
  * @file logger.hxx
  * @brief Thread-safe logger with synchronous and asynchronous output modes.
- * @version 2.2.0
+ * @version 2.2.1
  *
  * @details
  * `Logger` supports two operating modes selected at construction:
@@ -421,7 +421,7 @@ class Logger {
             case level::RAW:
                 return {.label = "       ", .color = ansi::codes::white, .use_err = false};
             case level::DEBUG:
-                return {.label = " DEBUG ", .color = ansi::codes::blue, .use_err = false};
+                return {.label = " DEBUG ", .color = ansi::codes::bright_magenta, .use_err = false};
             case level::INFO:
                 return {.label = "  INFO ", .color = ansi::codes::bright_blue, .use_err = false};
             case level::SUCCESS:
@@ -431,7 +431,7 @@ class Logger {
             case level::ERROR:
                 return {.label = " ERROR ", .color = ansi::codes::bright_red, .use_err = true};
             case level::FATAL:
-                return {.label = " FATAL ", .color = ansi::codes::bright_magenta, .use_err = true};
+                return {.label = " FATAL ", .color = ansi::codes::bright_red, .use_err = true};
         }
         return {.label = "       ", .color = ansi::codes::white, .use_err = false};
     }
@@ -558,70 +558,94 @@ class Logger {
         const bool need_plain = file_.is_open() || !to_stdout_ || !use_colors_ || !has_prefix;
         const bool need_colored = to_stdout_ && use_colors_ && has_prefix;
 
-        // Compute once, shared between both paths (12 / 13 chars — SSO, no heap alloc).
+        // Compute once, shared between all lines of a multi-line message.
         const std::string time_str = has_prefix ? format_time(rec.elapsed) : std::string{};
         const std::string mem_str = (has_prefix && rec.memory_kb >= 0) ? format_memory(rec.memory_kb) : std::string{};
 
-        // Plain line (for file and/or uncolored console).
         thread_local std::string plain;
-        if (need_plain) {
-            plain.clear();
-            if (has_prefix) {
-                plain += '[';
-                plain += time_str;
-                plain += "] ";
-                plain += mem_str;
-                if (show_thread_) {
-                    plain += rec.thread_id;
-                }
-                plain += '[';
-                plain += label;
-                plain += "] ";
-            }
-            plain += rec.message;
-        }
-
-        // Colored line — built into a second thread_local buffer, written in
-        // one ostr.write() call to avoid per-segment virtual-dispatch overhead.
         thread_local std::string colored;
-        if (need_colored) {
-            colored.clear();
-            colored += ansi::codes::cyan;
-            colored += '[';
-            colored += time_str;
-            colored += "] ";
-            colored += ansi::codes::reset;
-            if (!mem_str.empty()) {
-                colored += ansi::codes::green;
-                colored += mem_str;
-                colored += ansi::codes::reset;
-            }
-            if (show_thread_) {
-                colored += ansi::codes::magenta;
-                colored += rec.thread_id;
-                colored += ansi::codes::reset;
-            }
-            colored += color;
-            colored += '[';
-            colored += label;
-            colored += "] ";
-            colored += ansi::codes::reset;
-            colored += rec.message;
-            colored += '\n';
-        }
 
-        if (file_.is_open()) {
-            file_ << plain << '\n';
-            file_.flush();
-        }
+        // Emits one line (no embedded newlines) with the full prefix.
+        const auto write_line = [&](std::string_view line) {
+            // Plain line (for file and/or uncolored console).
+            if (need_plain) {
+                plain.clear();
+                if (has_prefix) {
+                    plain += '[';
+                    plain += time_str;
+                    plain += "] ";
+                    plain += mem_str;
+                    if (show_thread_) {
+                        plain += rec.thread_id;
+                    }
+                    plain += '[';
+                    plain += label;
+                    plain += "] ";
+                }
+                plain += line;
+            }
 
-        if (to_stdout_) {
-            std::ostream& ostr = use_err ? std::cerr : std::cout;
+            // Colored line — built into a second thread_local buffer, written in
+            // one ostr.write() call to avoid per-segment virtual-dispatch overhead.
             if (need_colored) {
-                ostr.write(colored.data(), static_cast<std::streamsize>(colored.size()));
-            } else {
-                ostr << plain << '\n';
+                colored.clear();
+                colored += ansi::codes::bright_cyan;
+                colored += '[';
+                colored += time_str;
+                colored += "] ";
+                colored += ansi::codes::reset;
+                if (!mem_str.empty()) {
+                    colored += ansi::codes::green;
+                    colored += mem_str;
+                    colored += ansi::codes::reset;
+                }
+                if (show_thread_) {
+                    colored += ansi::codes::magenta;
+                    colored += rec.thread_id;
+                    colored += ansi::codes::reset;
+                }
+                colored += color;
+                colored += '[';
+                colored += label;
+                colored += "] ";
+                colored += ansi::codes::reset;
+                colored += line;
+                colored += '\n';
             }
+
+            if (file_.is_open()) {
+                file_ << plain << '\n';
+                file_.flush();
+            }
+
+            if (to_stdout_) {
+                std::ostream& ostr = use_err ? std::cerr : std::cout;
+                if (need_colored) {
+                    ostr.write(colored.data(), static_cast<std::streamsize>(colored.size()));
+                } else {
+                    ostr << plain << '\n';
+                }
+            }
+        };
+
+        // Fast path: single-line message — one scan, no branching overhead.
+        std::string_view rest = rec.message;
+        if (rest.find('\n') == std::string_view::npos) {
+            write_line(rest);
+            return;
+        }
+
+        // Multi-line path: each segment gets its own full prefix.
+        while (true) {
+            const auto pos = rest.find('\n');
+            if (pos == std::string_view::npos) {
+                if (!rest.empty()) {
+                    write_line(rest);
+                }  // skip empty trailing segment from "msg\n"
+                break;
+            }
+            write_line(rest.substr(0, pos));
+            rest = rest.substr(pos + 1);
         }
     }
 
