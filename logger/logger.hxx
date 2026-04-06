@@ -3,7 +3,7 @@
 /**
  * @file logger.hxx
  * @brief Thread-safe logger with synchronous and asynchronous output modes.
- * @version 2.2.1
+ * @version 2.2.2
  *
  * @details
  * `Logger` supports two operating modes selected at construction:
