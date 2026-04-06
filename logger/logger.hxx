@@ -233,7 +233,7 @@ class Logger {
             }
             if (exit_on_error_ && level_ == level::FATAL) {
                 lg_->flush();
-                _Exit(EXIT_FAILURE);
+                abort();
             }
         }
 
@@ -355,7 +355,7 @@ class Logger {
     [[noreturn]] void fatal(std::string_view msg) {
         emit(msg, level::FATAL);
         flush();
-        _Exit(EXIT_FAILURE);
+        abort();
     }
 
     // ── Stream-style factory methods ──────────────────────────────────────────
