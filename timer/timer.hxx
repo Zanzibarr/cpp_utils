@@ -81,7 +81,7 @@ auto ns_to(double nanos) -> double {
 inline auto to_ns(clock::duration dur) -> double { return static_cast<double>(std::chrono::duration_cast<std::chrono::nanoseconds>(dur).count()); }
 
 template <ValidDuration D>
-constexpr auto unit_name() -> const char* {
+consteval auto unit_name() -> const char* {
     if constexpr (std::is_same_v<D, std::chrono::nanoseconds>) {
         return "ns";
     } else if constexpr (std::is_same_v<D, std::chrono::microseconds>) {
