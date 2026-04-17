@@ -19,6 +19,7 @@ Header-only C++20 utilities for performance-sensitive projects. Each utility liv
 | [interval](interval/interval.hxx) | Closed interval \[lo, hi\] for arithmetic types | — | [doc](docs/interval.md) |
 | [scope_guard](scope_guard/scope_guard.hxx) | RAII scope-exit/fail/success guard | — | [doc](docs/scope_guard.md) |
 | [limits](limits/limits.hxx) | Cooperative time and memory limits | — | [doc](docs/limits.md) |
+| [thread_pool](thread_pool/thread_pool.hxx) | Fixed-size thread pool, work-stealing, priority, cooperative cancellation | — | [doc](docs/thread_pool.md) |
 
 ## Dependency Graph
 
@@ -30,7 +31,7 @@ ansi_colors ──┬──→ logger
               ├──→ benchmarking
               └──→ testing
 
-binary_set, interval, scope_guard, limits   (no dependencies)
+binary_set, interval, scope_guard, limits, thread_pool   (no dependencies)
 ```
 
 Transitive dependency summary:
@@ -50,6 +51,7 @@ Transitive dependency summary:
 | interval | `interval.hxx` |
 | scope_guard | `scope_guard.hxx` |
 | limits | `limits.hxx` |
+| thread_pool | `thread_pool.hxx` |
 
 ## Copying Headers into Your Project
 
@@ -90,7 +92,7 @@ Destination files are **always overwritten** — re-running the script is safe a
 
 - **Standard:** C++20 — all library headers compile under C++20
 - **Dependencies:** standard library only — no external packages
-- **Threads:** `-pthread` required for `logger` (async mode), `timer`, and `stats_registry`
+- **Threads:** `-pthread` required for `logger` (async mode), `timer`, `stats_registry` and `thread_pool` 
 
 ```bash
 # Typical compile flags

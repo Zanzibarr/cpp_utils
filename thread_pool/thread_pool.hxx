@@ -2,28 +2,21 @@
 
 /**
  * @file thread_pool.hxx
- * @brief Efficient thread pool with future-based, continuation, and group-barrier synchronisation.
- * @version 1.0.0
+ * @brief Thread pool with per-thread work-stealing queues, future-based result retrieval and barrier synchronisation.
+ * @version 2.0.0
  *
  * @details
- * `ThreadPool` manages a fixed set of worker threads and distributes tasks
- * across them.  Three submission modes are provided:
- *   - **submit()** — returns a `Future<R>` for per-task synchronisation,
- *     result / exception retrieval, and continuation chaining.
- *   - **Future<T>::then()** — chains a dependent task that runs as soon as
- *     the parent future resolves; returns a new `Future<U>`.
- *   - **TaskGroup** — collects a set of tasks behind a barrier; `wait()`
- *     blocks until every task in the group has completed.
+ * `ThreadPool` manages a fixed set of worker threads, each with its own task
+ * queue.  Idle workers steal tasks from peers for load balancing.
+ * Two submission modes are provided:
+ *   - **submit()** — returns a `Future<R>` for per-task synchronisation and
+ *     result / exception retrieval.
+ *   - **submit(ShutdownPolicy::cancel, ...)** — task is dropped on shutdown;
+ *     the future receives a `runtime_error`.
  *
  * A `ShutdownPolicy` tag controls what happens to *queued* tasks on destruction:
  *   - **drain** (default) — queued tasks finish before threads are joined.
  *   - **cancel** — queued tasks are dropped; futures receive a runtime_error.
- *
- * ### Continuation dispatch
- * `Future<T>::then()` registers the continuation on the parent's shared state.
- * The continuation is submitted to the pool only when the parent task calls
- * `set_value()` — no worker thread ever blocks waiting for a predecessor.
- * `total_pending_` is incremented at submit time, so `wait_all()` is always safe.
  *
  * @code
  *   ThreadPool pool{4};
@@ -32,15 +25,9 @@
  *   auto f = pool.submit([] { return compute(); });
  *   int r = f.get();
  *
- *   // continuation chain — no main-thread blocking between stages
- *   auto g = pool.submit([] { return load(); })
- *                .then([](RawData d) { return process(d); });
- *   auto result = g.get();
- *
- *   // group barrier
- *   TaskGroup grp{pool};
- *   for (auto& item : data) grp.submit([&] { process(item); });
- *   grp.wait();
+ *   // fire-and-forget batch with barrier
+ *   for (auto& item : data) pool.submit([&] { process(item); });
+ *   pool.wait_all();
  * @endcode
  *
  * @author Matteo Zanella <matteozanella2@gmail.com>
@@ -51,23 +38,42 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <exception>
 #include <functional>
+#include <iterator>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <stdexcept>
+#include <stop_token>
 #include <thread>
 #include <tuple>
 #include <vector>
+
+// ── Priority ──────────────────────────────────────────────────────────────────
+
+/**
+ * @brief Scheduling priority for submitted tasks.
+ *
+ * Higher-priority tasks execute before lower-priority ones within the same queue.
+ * Work stealing always takes the back of the victim's deque (lowest-priority task).
+ *
+ * @code
+ *   pool.submit(Priority::high, f);                          // high, drain
+ *   pool.submit(Priority::high, ShutdownPolicy::cancel, f);  // high, cancel
+ * @endcode
+ */
+enum class Priority { low = 0, normal = 1, high = 2 };
 
 // ── ShutdownPolicy ────────────────────────────────────────────────────────────
 
 /**
  * @brief Controls the fate of queued (not yet started) tasks when the pool shuts down.
- *
- * Pass as the first argument to `submit()` to override the default (`drain`).
  *
  * @code
  *   pool.submit(task);                           // drain (default)
@@ -80,47 +86,57 @@ enum class ShutdownPolicy { drain, cancel };
 
 namespace thread_pool_detail {
 
+template <typename F, typename... Args>
+concept invocable_with_token = std::invocable<std::decay_t<F>, std::stop_token, std::decay_t<Args>...>;
+
+// Primary template: callable takes Args only.
+// Constrained specialisation wins when the callable also accepts a leading stop_token, giving the correct return type without any runtime check.
+template <typename F, typename... Args>
+struct result_type_impl : std::invoke_result<std::decay_t<F>, std::decay_t<Args>...> {};
+
+template <typename F, typename... Args>
+    requires invocable_with_token<F, Args...>
+struct result_type_impl<F, Args...> {
+    using type = std::invoke_result_t<std::decay_t<F>, std::stop_token, std::decay_t<Args>...>;
+};
+
+template <typename F, typename... Args>
+using result_type = typename result_type_impl<F, Args...>::type;
+
 struct Task {
     std::function<void()> body;
     std::function<void()> on_cancel;
     ShutdownPolicy policy;
+    Priority priority;
 };
 
-/**
- * @brief Custom shared state replacing std::promise/shared_future.
- *
- * Supports registering a single continuation that fires inline from
- * set_value()/set_exception() — no worker thread ever blocks on get().
- */
+struct WorkQueue {
+    std::deque<Task> tasks;
+    std::mutex mtx;
+    // condition_variable_any (not condition_variable) — required for the stop_token overload of wait() used in worker_fn.
+    std::condition_variable_any cv;
+};
+
 template <typename T>
 class SharedState {
    public:
+    // void is not storable in optional<>; monostate is a zero-size stand-in.
     using Box = std::conditional_t<std::is_void_v<T>, std::monostate, T>;
 
     void set_value(Box val = {}) {
-        std::function<void()> cont;
         {
             std::lock_guard lk(mtx_);
             value_.emplace(std::move(val));
-            cont = std::move(cont_);
         }
         cv_.notify_all();
-        if (cont) {
-            cont();
-        }
     }
 
     void set_exception(std::exception_ptr ep) {
-        std::function<void()> cont;
         {
             std::lock_guard lk(mtx_);
             ex_ = std::move(ep);
-            cont = std::move(cont_);
         }
         cv_.notify_all();
-        if (cont) {
-            cont();  // continuation propagates exception via get()
-        }
     }
 
     auto get() -> T {
@@ -134,22 +150,11 @@ class SharedState {
         }
     }
 
-    /** Register a continuation. Returns false if already complete — caller submits immediately. */
-    auto try_register(std::function<void()> cont) -> bool {
-        std::lock_guard lk(mtx_);
-        if (value_.has_value() || ex_ != nullptr) {
-            return false;
-        }
-        cont_ = std::move(cont);
-        return true;
-    }
-
    private:
     std::mutex mtx_;
     std::condition_variable cv_;
     std::optional<Box> value_;
     std::exception_ptr ex_;
-    std::function<void()> cont_;
 };
 
 }  // namespace thread_pool_detail
@@ -157,7 +162,6 @@ class SharedState {
 // ── Forward declarations ──────────────────────────────────────────────────────
 
 class ThreadPool;
-class TaskGroup;
 template <typename T>
 class Future;
 
@@ -167,16 +171,11 @@ class Future;
  * @brief Copyable future returned by `ThreadPool::submit()`.
  *
  * Wraps a `shared_ptr<SharedState<T>>` so it can be captured by value in
- * lambdas stored in `std::function`.
- *
- * Chaining via `.then(f)` registers the continuation on the shared state;
- * it is submitted to the originating pool only when the parent task completes.
- * No worker thread ever blocks waiting for a predecessor.
+ * lambdas or stored in containers. Multiple copies share the same result.
  *
  * @code
- *   auto f = pool.submit([] { return load(); })
- *                .then([](RawData d) { return process(d); });
- *   auto r = f.get();
+ *   auto f = pool.submit([] { return 42; });
+ *   int r = f.get();
  * @endcode
  */
 template <typename T>
@@ -192,35 +191,27 @@ class Future {
     /** @brief Block until the task completes and return its result. */
     auto get() const -> T { return state_->get(); }
 
-    /**
-     * @brief Register a continuation to run as soon as this future resolves.
-     *
-     * The continuation is submitted to the pool the moment the parent task
-     * calls set_value() — no worker thread is parked waiting.
-     *
-     * @return A new `Future<U>` where `U = std::invoke_result_t<F, T>`.
-     */
-    template <typename F>
-        requires std::invocable<std::decay_t<F>, T>
-    auto then(F&& func) -> Future<std::invoke_result_t<std::decay_t<F>, T>>;
+    /** @brief Request cooperative cancellation.  Safe no-op if the task ignores stop_token. */
+    void cancel() { stop_src_.request_stop(); }
 
    private:
-    Future(std::shared_ptr<thread_pool_detail::SharedState<T>> state, ThreadPool& pool) : state_(std::move(state)), pool_(&pool) {}
+    explicit Future(std::shared_ptr<thread_pool_detail::SharedState<T>> state, std::stop_source stop_src)
+        : state_(std::move(state)), stop_src_(std::move(stop_src)) {}
 
     friend class ThreadPool;
-    template <typename U>
-    friend class Future;
 
     std::shared_ptr<thread_pool_detail::SharedState<T>> state_{};
-    ThreadPool* pool_{nullptr};
+    // nostopstate: a default-constructed Future carries no token, so cancel() is a safe no-op.
+    std::stop_source stop_src_{std::nostopstate};
 };
 
 // ── ThreadPool ────────────────────────────────────────────────────────────────
 
 /**
- * @brief Fixed-size thread pool.
+ * @brief Fixed-size thread pool with per-thread work-stealing queues.
  *
- * Non-copyable, non-movable.  Destructor calls `shutdown()`.
+ * Each worker owns a queue; idle workers steal from peers (back of victim's
+ * deque) to balance load.  Non-copyable, non-movable.  Destructor calls `shutdown()`.
  */
 class ThreadPool {
    public:
@@ -228,9 +219,17 @@ class ThreadPool {
 
     /** @brief Create a pool with @p n worker threads (default: hardware concurrency). */
     explicit ThreadPool(std::size_t n = std::thread::hardware_concurrency()) {
+        // Always at least one queue so the stealing loop (which modulos by queues_.size()) never divides by zero, even when the pool has zero worker
+        // threads.
+        std::size_t n_queues = std::max(n, std::size_t{1});
+        queues_.reserve(n_queues);
+        for (std::size_t i = 0; i < n_queues; ++i) {
+            queues_.emplace_back(std::make_unique<thread_pool_detail::WorkQueue>());
+        }
+
         threads_.reserve(n);
         for (std::size_t i = 0; i < n; ++i) {
-            threads_.emplace_back([this](std::stop_token st) { worker_fn(std::move(st)); });
+            threads_.emplace_back([this, i](std::stop_token stoken) { worker_fn(i, std::move(stoken)); });
         }
     }
 
@@ -242,25 +241,113 @@ class ThreadPool {
     // ── Submit ───────────────────────────────────────────────────────────────
 
     /**
-     * @brief Submit a callable; returns a `Future<R>` for the result.  Default policy: drain.
+     * @brief Submit a callable; returns a `Future<R>` for the result.  Default: normal priority, drain.
+     *        Callable may optionally accept `std::stop_token` as its first parameter for cooperative cancellation.
      * @throws std::runtime_error if the pool has been shut down.
      */
     template <typename F, typename... Args>
-        requires std::invocable<std::decay_t<F>, std::decay_t<Args>...>
-    auto submit(F&& f, Args&&... args) -> Future<std::invoke_result_t<std::decay_t<F>, std::decay_t<Args>...>> {
-        using R = std::invoke_result_t<std::decay_t<F>, std::decay_t<Args>...>;
-        return Future<R>{submit_impl(ShutdownPolicy::drain, std::forward<F>(f), std::forward<Args>(args)...), *this};
+        requires(std::invocable<std::decay_t<F>, std::decay_t<Args>...> || thread_pool_detail::invocable_with_token<F, Args...>)
+    auto submit(F&& func, Args&&... args) -> Future<thread_pool_detail::result_type<F, Args...>> {
+        using R = thread_pool_detail::result_type<F, Args...>;
+        auto [state, stop_src] = submit_impl(Priority::normal, ShutdownPolicy::drain, std::forward<F>(func), std::forward<Args>(args)...);
+        return Future<R>{std::move(state), std::move(stop_src)};
     }
 
     /**
-     * @brief Submit with an explicit shutdown policy.
+     * @brief Submit with an explicit shutdown policy (normal priority).
      * @throws std::runtime_error if the pool has been shut down.
      */
     template <typename F, typename... Args>
-        requires std::invocable<std::decay_t<F>, std::decay_t<Args>...>
-    auto submit(ShutdownPolicy policy, F&& f, Args&&... args) -> Future<std::invoke_result_t<std::decay_t<F>, std::decay_t<Args>...>> {
-        using R = std::invoke_result_t<std::decay_t<F>, std::decay_t<Args>...>;
-        return Future<R>{submit_impl(policy, std::forward<F>(f), std::forward<Args>(args)...), *this};
+        requires(std::invocable<std::decay_t<F>, std::decay_t<Args>...> || thread_pool_detail::invocable_with_token<F, Args...>)
+    auto submit(ShutdownPolicy policy, F&& func, Args&&... args) -> Future<thread_pool_detail::result_type<F, Args...>> {
+        using R = thread_pool_detail::result_type<F, Args...>;
+        auto [state, stop_src] = submit_impl(Priority::normal, policy, std::forward<F>(func), std::forward<Args>(args)...);
+        return Future<R>{std::move(state), std::move(stop_src)};
+    }
+
+    /**
+     * @brief Submit with an explicit priority (drain policy).
+     * @throws std::runtime_error if the pool has been shut down.
+     */
+    template <typename F, typename... Args>
+        requires(std::invocable<std::decay_t<F>, std::decay_t<Args>...> || thread_pool_detail::invocable_with_token<F, Args...>)
+    auto submit(Priority priority, F&& func, Args&&... args) -> Future<thread_pool_detail::result_type<F, Args...>> {
+        using R = thread_pool_detail::result_type<F, Args...>;
+        auto [state, stop_src] = submit_impl(priority, ShutdownPolicy::drain, std::forward<F>(func), std::forward<Args>(args)...);
+        return Future<R>{std::move(state), std::move(stop_src)};
+    }
+
+    /**
+     * @brief Submit with explicit priority and shutdown policy.
+     * @throws std::runtime_error if the pool has been shut down.
+     */
+    template <typename F, typename... Args>
+        requires(std::invocable<std::decay_t<F>, std::decay_t<Args>...> || thread_pool_detail::invocable_with_token<F, Args...>)
+    auto submit(Priority priority, ShutdownPolicy policy, F&& func, Args&&... args) -> Future<thread_pool_detail::result_type<F, Args...>> {
+        using R = thread_pool_detail::result_type<F, Args...>;
+        auto [state, stop_src] = submit_impl(priority, policy, std::forward<F>(func), std::forward<Args>(args)...);
+        return Future<R>{std::move(state), std::move(stop_src)};
+    }
+
+    // ── Bulk submit ──────────────────────────────────────────────────────────
+
+    /** @brief Submit one task per element in [first, last); returns a vector of futures. */
+    template <typename Iter, typename F>
+    auto submit_each(Priority priority, ShutdownPolicy policy, Iter first, Iter last, F func)
+        -> std::vector<Future<thread_pool_detail::result_type<F, std::iter_reference_t<Iter>>>> {
+        using R = thread_pool_detail::result_type<F, std::iter_reference_t<Iter>>;
+        std::vector<Future<R>> futs;
+        for (auto it = first; it != last; ++it) {
+            auto [state, stop_src] = submit_impl(priority, policy, func, *it);
+            futs.emplace_back(Future<R>{std::move(state), std::move(stop_src)});
+        }
+        return futs;
+    }
+
+    template <typename Iter, typename F>
+    auto submit_each(Priority priority, Iter first, Iter last, F&& func)
+        -> std::vector<Future<thread_pool_detail::result_type<F, std::iter_reference_t<Iter>>>> {
+        return submit_each(priority, ShutdownPolicy::drain, first, last, std::forward<F>(func));
+    }
+
+    template <typename Iter, typename F>
+    auto submit_each(ShutdownPolicy policy, Iter first, Iter last, F&& func)
+        -> std::vector<Future<thread_pool_detail::result_type<F, std::iter_reference_t<Iter>>>> {
+        return submit_each(Priority::normal, policy, first, last, std::forward<F>(func));
+    }
+
+    template <typename Iter, typename F>
+    auto submit_each(Iter first, Iter last, F&& func) -> std::vector<Future<thread_pool_detail::result_type<F, std::iter_reference_t<Iter>>>> {
+        return submit_each(Priority::normal, ShutdownPolicy::drain, first, last, std::forward<F>(func));
+    }
+
+    /** @brief Submit n tasks indexed 0..n-1; callable receives `std::size_t i`. Returns a vector of futures. */
+    template <typename F>
+    auto submit_n(Priority priority, ShutdownPolicy policy, std::size_t n, F func)
+        -> std::vector<Future<thread_pool_detail::result_type<F, std::size_t>>> {
+        using R = thread_pool_detail::result_type<F, std::size_t>;
+        std::vector<Future<R>> futs;
+        futs.reserve(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            auto [state, stop_src] = submit_impl(priority, policy, func, i);
+            futs.emplace_back(Future<R>{std::move(state), std::move(stop_src)});
+        }
+        return futs;
+    }
+
+    template <typename F>
+    auto submit_n(Priority priority, std::size_t n, F&& func) -> std::vector<Future<thread_pool_detail::result_type<F, std::size_t>>> {
+        return submit_n(priority, ShutdownPolicy::drain, n, std::forward<F>(func));
+    }
+
+    template <typename F>
+    auto submit_n(ShutdownPolicy policy, std::size_t n, F&& func) -> std::vector<Future<thread_pool_detail::result_type<F, std::size_t>>> {
+        return submit_n(Priority::normal, policy, n, std::forward<F>(func));
+    }
+
+    template <typename F>
+    auto submit_n(std::size_t n, F&& func) -> std::vector<Future<thread_pool_detail::result_type<F, std::size_t>>> {
+        return submit_n(Priority::normal, ShutdownPolicy::drain, n, std::forward<F>(func));
     }
 
     // ── Synchronisation ──────────────────────────────────────────────────────
@@ -269,6 +356,20 @@ class ThreadPool {
     void wait_all() {
         std::unique_lock lock(wait_mutex_);
         wait_cv_.wait(lock, [this] { return total_pending_.load(std::memory_order_acquire) == 0; });
+    }
+
+    /** @brief Block at most @p timeout; returns true if all tasks finished, false if timed out. */
+    template <typename Rep, typename Period>
+    auto wait_for(std::chrono::duration<Rep, Period> timeout) -> bool {
+        std::unique_lock lock(wait_mutex_);
+        return wait_cv_.wait_for(lock, timeout, [this] { return total_pending_.load(std::memory_order_acquire) == 0; });
+    }
+
+    /** @brief Block until @p deadline; returns true if all tasks finished, false if timed out. */
+    template <typename Clock, typename Duration>
+    auto wait_until(std::chrono::time_point<Clock, Duration> deadline) -> bool {
+        std::unique_lock lock(wait_mutex_);
+        return wait_cv_.wait_until(lock, deadline, [this] { return total_pending_.load(std::memory_order_acquire) == 0; });
     }
 
     // ── Lifecycle ────────────────────────────────────────────────────────────
@@ -281,21 +382,24 @@ class ThreadPool {
      */
     void shutdown() {
         {
-            std::lock_guard lock(mutex_);
+            std::lock_guard global_lk(global_mtx_);
             if (stopped_) {
                 return;
             }
             stopped_ = true;
 
-            for (auto it = queue_.begin(); it != queue_.end();) {
-                if (it->policy == ShutdownPolicy::cancel) {
-                    if (it->on_cancel) {
-                        it->on_cancel();
+            for (auto& queue : queues_) {
+                std::lock_guard q_lk(queue->mtx);
+                for (auto it = queue->tasks.begin(); it != queue->tasks.end();) {
+                    if (it->policy == ShutdownPolicy::cancel) {
+                        if (it->on_cancel) {
+                            it->on_cancel();
+                        }
+                        total_pending_.fetch_sub(1, std::memory_order_relaxed);
+                        it = queue->tasks.erase(it);
+                    } else {
+                        ++it;
                     }
-                    total_pending_.fetch_sub(1, std::memory_order_relaxed);
-                    it = queue_.erase(it);
-                } else {
-                    ++it;
                 }
             }
         }
@@ -305,8 +409,12 @@ class ThreadPool {
             wait_cv_.notify_all();
         }
 
-        for (auto& t : threads_) t.request_stop();
-        cv_.notify_all();
+        for (auto& t : threads_) {
+            t.request_stop();
+        }
+        for (auto& queue : queues_) {
+            queue->cv.notify_all();
+        }
         threads_.clear();  // jthread destructor joins
     }
 
@@ -319,191 +427,135 @@ class ThreadPool {
     auto pending_count() const noexcept -> std::size_t { return total_pending_.load(std::memory_order_relaxed); }
 
    private:
-    friend class TaskGroup;
     template <typename T>
     friend class Future;
 
     // ── Internal ─────────────────────────────────────────────────────────────
 
     template <typename F, typename... Args>
-    auto submit_impl(ShutdownPolicy policy, F&& f, Args&&... args)
-        -> std::shared_ptr<thread_pool_detail::SharedState<std::invoke_result_t<std::decay_t<F>, std::decay_t<Args>...>>> {
-        using R = std::invoke_result_t<std::decay_t<F>, std::decay_t<Args>...>;
+    auto submit_impl(Priority priority, ShutdownPolicy policy, F&& func, Args&&... args)
+        -> std::pair<std::shared_ptr<thread_pool_detail::SharedState<thread_pool_detail::result_type<F, Args...>>>, std::stop_source> {
+        using R = thread_pool_detail::result_type<F, Args...>;
         auto state = std::make_shared<thread_pool_detail::SharedState<R>>();
-        push_task({[fn = std::forward<F>(f), tup = std::make_tuple(std::forward<Args>(args)...), state]() mutable {
-                       try {
-                           if constexpr (std::is_void_v<R>) {
-                               std::apply(std::move(fn), std::move(tup));
-                               state->set_value();
-                           } else {
-                               state->set_value(std::apply(std::move(fn), std::move(tup)));
-                           }
-                       } catch (...) {
-                           state->set_exception(std::current_exception());
-                       }
-                   },
-                   [state] { state->set_exception(std::make_exception_ptr(std::runtime_error("task cancelled"))); }, policy});
-        return state;
+        auto stop_src = std::stop_source{};
+        push_task(
+            {// Args are packed into a tuple because std::function<void()> erases the type;
+             // std::apply unpacks them back into the call. mutable is required to move out of captures.
+             [callable = std::forward<F>(func), tup = std::make_tuple(std::forward<Args>(args)...), state, token = stop_src.get_token()]() mutable {
+                 try {
+                     if constexpr (std::is_void_v<R>) {
+                         if constexpr (thread_pool_detail::invocable_with_token<F, Args...>) {
+                             std::apply([&callable, &token](
+                                            auto&&... uargs) { std::invoke(std::move(callable), token, std::forward<decltype(uargs)>(uargs)...); },
+                                        std::move(tup));
+                         } else {
+                             std::apply(std::move(callable), std::move(tup));
+                         }
+                         state->set_value();
+                     } else {
+                         if constexpr (thread_pool_detail::invocable_with_token<F, Args...>) {
+                             state->set_value(std::apply(
+                                 [&callable, &token](auto&&... uargs) {
+                                     return std::invoke(std::move(callable), token, std::forward<decltype(uargs)>(uargs)...);
+                                 },
+                                 std::move(tup)));
+                         } else {
+                             state->set_value(std::apply(std::move(callable), std::move(tup)));
+                         }
+                     }
+                 } catch (...) {
+                     state->set_exception(std::current_exception());
+                 }
+             },
+             [state] { state->set_exception(std::make_exception_ptr(std::runtime_error("task cancelled"))); }, policy, priority});
+        return {state, std::move(stop_src)};
     }
 
     void push_task(thread_pool_detail::Task task) {
-        {
-            std::lock_guard lock(mutex_);
-            if (stopped_) {
-                throw std::runtime_error("ThreadPool is stopped");
-            }
-            total_pending_.fetch_add(1, std::memory_order_relaxed);
-            queue_.push_back(std::move(task));
+        std::lock_guard global_lk(global_mtx_);
+        if (stopped_) {
+            throw std::runtime_error("ThreadPool is stopped");
         }
-        cv_.notify_one();
+        total_pending_.fetch_add(1, std::memory_order_relaxed);
+        std::size_t idx = next_push_.fetch_add(1, std::memory_order_relaxed) % queues_.size();
+        {
+            std::lock_guard q_lk(queues_[idx]->mtx);
+            // Insert before the first task with lower priority, keeping the deque
+            // sorted descending. Workers pop_front, so the highest-priority task runs next.
+            auto pos = std::find_if(queues_[idx]->tasks.begin(), queues_[idx]->tasks.end(),
+                                    [&task](const thread_pool_detail::Task& existing) { return existing.priority < task.priority; });
+            queues_[idx]->tasks.insert(pos, std::move(task));
+        }
+        queues_[idx]->cv.notify_one();
     }
 
     void task_done() noexcept {
+        // fetch_sub returns the old value, so == 1 means this was the last task.
+        // acq_rel: the release half makes the task's side-effects visible to whoever
+        // wakes from wait_all/wait_for.
         if (total_pending_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
             std::lock_guard lock(wait_mutex_);
             wait_cv_.notify_all();
         }
     }
 
-    void worker_fn(std::stop_token stoken) {
+    void worker_fn(std::size_t my_idx, std::stop_token stoken) {
         while (true) {
             thread_pool_detail::Task task;
+            bool got_task = false;
+
+            // Try own queue first
             {
-                std::unique_lock lock(mutex_);
-                cv_.wait(lock, stoken, [this] { return !queue_.empty(); });
-                if (queue_.empty()) {
-                    break;
+                std::lock_guard own_lk(queues_[my_idx]->mtx);
+                if (!queues_[my_idx]->tasks.empty()) {
+                    task = std::move(queues_[my_idx]->tasks.front());
+                    queues_[my_idx]->tasks.pop_front();
+                    got_task = true;
                 }
-                task = std::move(queue_.front());
-                queue_.pop_front();
             }
-            task.body();
-            task_done();
+
+            // Steal from peers (back of victim = their lowest-priority work)
+            if (!got_task) {
+                for (std::size_t i = 1; i < queues_.size(); ++i) {
+                    std::size_t victim = (my_idx + i) % queues_.size();
+                    // try_to_lock: non-blocking — if the victim is busy, skip to the next one
+                    // rather than stalling. Avoids priority inversion and convoy effects.
+                    std::unique_lock steal_lk(queues_[victim]->mtx, std::try_to_lock);
+                    if (steal_lk && !queues_[victim]->tasks.empty()) {
+                        // Back = lowest-priority task: the victim loses its least-valuable work first.
+                        task = std::move(queues_[victim]->tasks.back());
+                        queues_[victim]->tasks.pop_back();
+                        got_task = true;
+                        break;
+                    }
+                }
+            }
+
+            if (got_task) {
+                task.body();
+                task_done();
+                continue;
+            }
+
+            // Nothing to do — wait on own CV (wakes on new task or stop request)
+            std::unique_lock wait_lk(queues_[my_idx]->mtx);
+            // C++20 stop_token overload: returns when either the predicate is true
+            // OR the stop has been requested, eliminating the need for a manual poll loop.
+            queues_[my_idx]->cv.wait(wait_lk, stoken, [this, my_idx] { return !queues_[my_idx]->tasks.empty(); });
+            if (queues_[my_idx]->tasks.empty()) {
+                break;  // stop requested with no remaining work
+            }
         }
     }
 
     // ── Data ─────────────────────────────────────────────────────────────────
 
-    std::deque<thread_pool_detail::Task> queue_;
-    std::mutex mutex_;
-    std::condition_variable_any cv_;
+    std::vector<std::unique_ptr<thread_pool_detail::WorkQueue>> queues_;
+    std::mutex global_mtx_;
+    std::atomic<std::size_t> next_push_{0};
     std::vector<std::jthread> threads_;
     std::atomic<std::size_t> total_pending_{0};
     bool stopped_{false};
     std::mutex wait_mutex_;
     std::condition_variable wait_cv_;
-};
-
-// ── Future<T>::then() — defined after ThreadPool ──────────────────────────────
-
-template <typename T>
-template <typename F>
-    requires std::invocable<std::decay_t<F>, T>
-auto Future<T>::then(F&& func) -> Future<std::invoke_result_t<std::decay_t<F>, T>> {
-    using U = std::invoke_result_t<std::decay_t<F>, T>;
-
-    auto new_state = std::make_shared<thread_pool_detail::SharedState<U>>();
-
-    // Wrap in shared_ptr so do_submit is copyable for storage in std::function.
-    // parent_state->get() is non-blocking here: the parent set its value before
-    // firing this continuation.
-    auto body = std::make_shared<std::function<void()>>([parent_state = state_, new_state, fn = std::forward<F>(func)]() mutable {
-        try {
-            if constexpr (std::is_void_v<U>) {
-                fn(parent_state->get());
-                new_state->set_value();
-            } else {
-                new_state->set_value(fn(parent_state->get()));
-            }
-        } catch (...) {
-            new_state->set_exception(std::current_exception());
-        }
-    });
-
-    auto do_submit = [pool = pool_, body]() { pool->push_task({[body]() { (*body)(); }, nullptr, ShutdownPolicy::drain}); };
-
-    if (!state_->try_register(do_submit)) {
-        do_submit();
-    }
-    return Future<U>{std::move(new_state), *pool_};
-}
-
-// ── TaskGroup ─────────────────────────────────────────────────────────────────
-
-/**
- * @brief Group of tasks behind a barrier — `wait()` returns only when all finish.
- *
- * The TaskGroup must not outlive the `ThreadPool` it references.
- * Exceptions thrown by group tasks are silently swallowed (use `submit()` with
- * a future if exception propagation is required).
- *
- * Non-copyable, non-movable.
- *
- * @code
- *   TaskGroup g{pool};
- *   for (auto& item : data) g.submit([&] { process(item); });
- *   g.wait();
- * @endcode
- */
-class TaskGroup {
-   public:
-    explicit TaskGroup(ThreadPool& pool) : pool_(pool) {}
-
-    TaskGroup(const TaskGroup&) = delete;
-    auto operator=(const TaskGroup&) -> TaskGroup& = delete;
-
-    // ── Submit ───────────────────────────────────────────────────────────────
-
-    /** @brief Submit a task to the group.  Default policy: drain. */
-    template <typename F, typename... Args>
-        requires std::invocable<std::decay_t<F>, std::decay_t<Args>...>
-    void submit(F&& f, Args&&... args) {
-        submit_impl(ShutdownPolicy::drain, std::forward<F>(f), std::forward<Args>(args)...);
-    }
-
-    /** @brief Submit with an explicit shutdown policy. */
-    template <typename F, typename... Args>
-        requires std::invocable<std::decay_t<F>, std::decay_t<Args>...>
-    void submit(ShutdownPolicy policy, F&& f, Args&&... args) {
-        submit_impl(policy, std::forward<F>(f), std::forward<Args>(args)...);
-    }
-
-    // ── Synchronisation ──────────────────────────────────────────────────────
-
-    /** @brief Block until all tasks submitted to this group have finished (or been cancelled). */
-    void wait() {
-        std::unique_lock lock(cv_mutex_);
-        cv_.wait(lock, [this] { return pending_.load(std::memory_order_acquire) == 0; });
-    }
-
-    /** @brief Non-blocking check — true if all submitted tasks have finished. */
-    auto done() const noexcept -> bool { return pending_.load(std::memory_order_acquire) == 0; }
-
-   private:
-    template <typename F, typename... Args>
-    void submit_impl(ShutdownPolicy policy, F&& f, Args&&... args) {
-        pending_.fetch_add(1, std::memory_order_relaxed);
-
-        auto body = [fn = std::forward<F>(f), args_tup = std::make_tuple(std::forward<Args>(args)...), this]() mutable {
-            try {
-                std::apply(std::move(fn), std::move(args_tup));
-            } catch (...) {
-            }
-            task_done();
-        };
-
-        pool_.push_task({std::move(body), [this] { task_done(); }, policy});
-    }
-
-    void task_done() noexcept {
-        if (pending_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-            std::lock_guard lock(cv_mutex_);
-            cv_.notify_all();
-        }
-    }
-
-    ThreadPool& pool_;
-    std::atomic<std::size_t> pending_{0};
-    std::mutex cv_mutex_;
-    std::condition_variable cv_;
 };
