@@ -82,7 +82,7 @@ struct benchmark_result {
 // expression.  Uses the same pattern as Google Benchmark / nanobench.
 // ─────────────────────────────────────────────────────────────────────────────
 
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(__clang__)
 template <typename T>
 inline void DoNotOptimize(T const& val) {
     asm volatile("" : : "r,m"(val) : "memory");
@@ -90,6 +90,15 @@ inline void DoNotOptimize(T const& val) {
 template <typename T>
 inline void DoNotOptimize(T& val) {
     asm volatile("" : "+r,m"(val) : : "memory");
+}
+#elif defined(__GNUC__)
+template <typename T>
+inline void DoNotOptimize(T const& val) {
+    asm volatile("" : : "rm"(val) : "memory");
+}
+template <typename T>
+inline void DoNotOptimize(T& val) {
+    asm volatile("" : "+rm"(val) : : "memory");
 }
 #else
 // MSVC / unknown: volatile store is the best we can do portably
@@ -345,7 +354,7 @@ struct auto_bench_registrar {
 // BENCH_SUITE — sets the current suite name for following BENCH_CASEs
 // ─────────────────────────────────────────────────────────────────────────────
 namespace {
-inline const char* _bm_current_suite_ = "<unset>";
+[[maybe_unused]] inline const char* _bm_current_suite_ = "<unset>";
 }
 
 #define BENCH_SUITE(name)                                        \

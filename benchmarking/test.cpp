@@ -1,5 +1,6 @@
 #include <cstddef>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../benchmarking/benchmark.hxx"
@@ -29,7 +30,7 @@ TEST_CASE("every sample is a positive duration") {
     benchmark::bench_state state(5);
     for (auto iteration : state) {
         (void)iteration;
-        benchmark::DoNotOptimize(iteration);
+        std::this_thread::sleep_for(std::chrono::microseconds(1));
     }
     for (double sample : state.samples()) {
         expect(sample).to_be_greater_than(0.0);
