@@ -40,7 +40,10 @@
 #include <unistd.h>
 
 #include <fstream>
+
 #endif
+
+namespace utilz {
 
 // ── TimeLimiter ───────────────────────────────────────────────────────────────
 
@@ -331,3 +334,5 @@ inline void set_memory_limit(std::size_t limit_mb, MemoryLimiter::Callback on_ex
  * Does NOT reset `global_limits::memory_flag` if it already fired.
  */
 inline void cancel_memory_limit() { global_limits::global_memory_limiter.cancel(); }
+
+}  // namespace utilz

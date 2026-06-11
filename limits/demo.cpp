@@ -22,6 +22,8 @@
 
 #include "limits.hxx"
 
+using namespace utilz;
+
 // ─── simulation helpers ──────────────────────────────────────────────────────
 
 static auto rng = std::mt19937{std::random_device{}()};
@@ -40,8 +42,7 @@ bool process_chunk(TimeLimiter& limiter, int min_ms, int max_ms) {
     auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(chunk_time);
 
     while (std::chrono::steady_clock::now() < deadline) {
-        if (limiter.expired() || global_limits::time_reached() || global_limits::memory_reached())
-            return false;
+        if (limiter.expired() || global_limits::time_reached() || global_limits::memory_reached()) return false;
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     return true;
@@ -103,9 +104,7 @@ int main() {
 
     // Show current RSS so the memory limit is meaningful.
     const auto rss = memlim::current_memory_usage();
-    const std::string rss_str = (rss > 0)
-        ? std::format("{} MB", rss / static_cast<std::ptrdiff_t>(memlim::BYTES_PER_MB))
-        : "unknown";
+    const std::string rss_str = (rss > 0) ? std::format("{} MB", rss / static_cast<std::ptrdiff_t>(memlim::BYTES_PER_MB)) : "unknown";
 
     std::cout << std::format(
         "limits.hxx demo\n"

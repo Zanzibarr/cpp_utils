@@ -20,6 +20,8 @@
 #include "../timer/timer.hxx"
 #include "thread_pool.hxx"
 
+using namespace utilz;
+
 using enum LoggerLevel;
 
 // ─────────────────────────────────────────────────────────────────────────────

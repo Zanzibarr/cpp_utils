@@ -31,7 +31,10 @@
 
 #ifndef _WIN32
 #include <unistd.h>
+
 #endif
+
+namespace utilz {
 
 namespace ansi {
 
@@ -84,3 +87,5 @@ inline auto bold(std::string_view str) -> std::string { return enabled() ? "\033
 inline auto dim(std::string_view str) -> std::string { return enabled() ? "\033[2m" + std::string(str) + "\033[0m" : std::string(str); }
 
 }  // namespace ansi
+
+}  // namespace utilz

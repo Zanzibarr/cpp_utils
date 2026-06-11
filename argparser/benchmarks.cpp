@@ -19,6 +19,8 @@
 #include "../benchmarking/bench_main.hpp"
 #include "argparser.hxx"
 
+using namespace utilz;
+
 using benchmark::DoNotOptimize;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -102,8 +104,7 @@ BENCH_CASE("parse four mixed-type arguments") {
     parser.add<"bm_p4_s", std::string>().default_val(std::string{""});
     parser.add<"bm_p4_v", bool>().default_val(false);
 
-    Args args{"prog", "--bm_p4_n", "10", "--bm_p4_lr", "0.01",
-              "--bm_p4_s", "adam", "--bm_p4_v", "true"};
+    Args args{"prog", "--bm_p4_n", "10", "--bm_p4_lr", "0.01", "--bm_p4_s", "adam", "--bm_p4_v", "true"};
 
     for (auto _ : state) {
         parser.parse(args.argc(), args.argv());
@@ -137,9 +138,8 @@ BENCH_CASE("parse eight int arguments") {
     parser.add<"bm_p8_g", int>().default_val(0);
     parser.add<"bm_p8_h", int>().default_val(0);
 
-    Args args{"prog",
-              "--bm_p8_a", "1", "--bm_p8_b", "2", "--bm_p8_c", "3", "--bm_p8_d", "4",
-              "--bm_p8_e", "5", "--bm_p8_f", "6", "--bm_p8_g", "7", "--bm_p8_h", "8"};
+    Args args{"prog",      "--bm_p8_a", "1",         "--bm_p8_b", "2",         "--bm_p8_c", "3",         "--bm_p8_d", "4",
+              "--bm_p8_e", "5",         "--bm_p8_f", "6",         "--bm_p8_g", "7",         "--bm_p8_h", "8"};
 
     for (auto _ : state) {
         parser.parse(args.argc(), args.argv());

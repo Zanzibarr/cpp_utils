@@ -3,6 +3,8 @@
 
 #include "argparser.hxx"
 
+using namespace utilz;
+
 void check_params(cli::ArgParser& parser) {
     auto name = parser.get<"name", std::string>();
     if (name == "Riccardo") {

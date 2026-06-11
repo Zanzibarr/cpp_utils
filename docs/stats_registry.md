@@ -1,5 +1,7 @@
 # stats_registry
 
+> All symbols below live in `namespace utilz`; examples assume `using namespace utilz;`.
+
 **File:** [`stats_registry/stats_registry.hxx`](../stats_registry/stats_registry.hxx)
 **Dependencies:** [timer](timer.md) → [ct_string](ct_string.md)
 **Benchmarks:** [stats_registry/BENCHMARKS.md](../stats_registry/BENCHMARKS.md)

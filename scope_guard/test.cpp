@@ -1,6 +1,8 @@
 #include "../scope_guard/scope_guard.hxx"
 #include "../testing/test_main.hpp"
 
+using namespace utilz;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // EXIT strategy
 // ─────────────────────────────────────────────────────────────────────────────

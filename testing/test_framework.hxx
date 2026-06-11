@@ -43,6 +43,7 @@
 
 #include "../utilities/ansi_colors.hxx"  // TODO: Update to the actual path
 
+namespace utilz {
 // ─────────────────────────────────────────────────────────────────────────────
 // ANSI colors — thin namespace aliases over the shared ansi:: helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -302,6 +303,8 @@ struct auto_registrar {
 
 }  // namespace testing
 
+}  // namespace utilz
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Macro helpers — paste two tokens together
 // ─────────────────────────────────────────────────────────────────────────────
@@ -336,20 +339,20 @@ inline const char* _ts_current_suite_ = "<unset>";
 //   (1) a function definition:  _ts_fn_<LINE>()  { ... }
 //   (2) a static auto_registrar that fires at program startup
 // ─────────────────────────────────────────────────────────────────────────────
-#define TEST_CASE(test_name)                                                                                                 \
-    static void _TS_CAT(_ts_fn_, __LINE__)();                                                                                \
-    static ::testing::auto_registrar _TS_CAT(_ts_reg_, __LINE__)(_ts_current_suite_, test_name, _TS_CAT(_ts_fn_, __LINE__)); \
+#define TEST_CASE(test_name)                                                                                                        \
+    static void _TS_CAT(_ts_fn_, __LINE__)();                                                                                       \
+    static ::utilz::testing::auto_registrar _TS_CAT(_ts_reg_, __LINE__)(_ts_current_suite_, test_name, _TS_CAT(_ts_fn_, __LINE__)); \
     static void _TS_CAT(_ts_fn_, __LINE__)()
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Assertion macros
 // ─────────────────────────────────────────────────────────────────────────────
 
-#define expect(val) ::testing::expectation((val), __FILE__, __LINE__)
+#define expect(val) ::utilz::testing::expectation((val), __FILE__, __LINE__)
 
 // (void)(__VA_ARGS__) suppresses -Wunused-result for [[nodiscard]] functions
 // and -Wunused-comparison for equality/inequality operators called purely
 // for their side-effects (i.e. to verify they throw).
-#define expect_throws(ExType, ...) ::testing::check_throws<ExType>([&] { (void)(__VA_ARGS__); }, __FILE__, __LINE__)
+#define expect_throws(ExType, ...) ::utilz::testing::check_throws<ExType>([&] { (void)(__VA_ARGS__); }, __FILE__, __LINE__)
 
-#define expect_no_throw(...) ::testing::check_no_throw([&] { __VA_ARGS__; }, __FILE__, __LINE__)
+#define expect_no_throw(...) ::utilz::testing::check_no_throw([&] { __VA_ARGS__; }, __FILE__, __LINE__)

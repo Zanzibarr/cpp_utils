@@ -45,6 +45,7 @@
 
 #include "../utilities/ct_string.hxx"  // TODO: Update to the actual path
 
+namespace utilz {
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -192,8 +193,8 @@ class ParameterRegistry {
 
         if (slot.active && slot.name != Name.view()) {
             // Two different names mapped to the same slot — data corruption would occur silently.
-            throw std::logic_error(std::format("ParameterRegistry: FNV-1a hash collision between '{}' and '{}' (same slot index)",
-                                               slot.name, std::string(Name.view())));
+            throw std::logic_error(
+                std::format("ParameterRegistry: FNV-1a hash collision between '{}' and '{}' (same slot index)", slot.name, std::string(Name.view())));
         }
 
         slot.value = std::move(stored);
@@ -379,4 +380,6 @@ inline auto global_params() -> ParameterRegistry& {
     return inst;
 }
 
-#define PARAMS global_params()
+#define PARAMS ::utilz::global_params()
+
+}  // namespace utilz

@@ -1,6 +1,19 @@
 # cpp_utils
 
+[![CI](https://github.com/Zanzibarr/cpp_utils/actions/workflows/ci.yml/badge.svg)](https://github.com/Zanzibarr/cpp_utils/actions/workflows/ci.yml)
+
 Header-only C++20 utilities for performance-sensitive projects. Each utility lives in its own folder, has no external dependencies, and can be used standalone or alongside others.
+
+## Namespace
+
+All symbols live in `namespace utilz` (e.g. `utilz::ThreadPool`, `utilz::Logger`, `utilz::testing`, `utilz::benchmark`). Convenience macros (`PARAMS`, `STATS_REG`, `TIMER_REG`, `TEST_CASE`, `BENCH_CASE`, ...) are fully qualified internally and work from any scope.
+
+```cpp
+#include "thread_pool/thread_pool.hxx"
+
+utilz::ThreadPool pool{4};          // qualified
+using namespace utilz;              // or import everything
+```
 
 ## Utilities
 
@@ -91,6 +104,7 @@ Destination files are **always overwritten** — re-running the script is safe a
 ## Build Requirements
 
 - **Standard:** C++20 — all library headers compile under C++20
+- **Compiler:** a toolchain with `<format>` support is required by `argparser` and `parameters` — GCC ≥ 13, Clang ≥ 17 (libc++) / Clang + libstdc++ 13, AppleClang ≥ 15
 - **Dependencies:** standard library only — no external packages
 - **Threads:** `-pthread` required for `logger` (async mode), `timer`, `stats_registry` and `thread_pool` 
 
@@ -100,3 +114,19 @@ g++ -std=c++20 -O2 -pthread your_file.cpp -o output
 ```
 
 Headers are self-contained — just drop them in your include path and `#include` them.
+
+## Development
+
+Every module ships its own `test.cpp` built on the in-repo [testing](docs/testing.md) framework (the two `utilities/` headers share `utilities/test.cpp`). To run a module's tests:
+
+```bash
+g++ -std=c++20 -O2 -pthread <module>/test.cpp -o <module>/test && ./<module>/test
+```
+
+CI ([ci.yml](.github/workflows/ci.yml)) builds and runs all tests with GCC and Clang on Linux and AppleClang on macOS, compiles every demo and benchmark, and enforces formatting via the repo's [.clang-format](.clang-format) — run `clang-format -i` on touched files before committing.
+
+A local-only dev dashboard (`dashboard/server.py`, not tracked in git) compiles and runs tests, benchmarks and LLVM coverage with a browser UI:
+
+```bash
+cd dashboard && python3 server.py   # opens http://localhost:8080
+```

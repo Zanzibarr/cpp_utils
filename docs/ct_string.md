@@ -1,5 +1,7 @@
 # ct_string
 
+> All symbols below live in `namespace utilz`; examples assume `using namespace utilz;`.
+
 **File:** [`utilities/ct_string.hxx`](../utilities/ct_string.hxx)
 **Dependencies:** none
 

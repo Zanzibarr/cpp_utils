@@ -21,6 +21,8 @@
 #include "../benchmarking/bench_main.hpp"
 #include "scope_guard.hxx"
 
+using namespace utilz;
+
 using benchmark::DoNotOptimize;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -212,9 +214,7 @@ BENCH_CASE("EXIT guard — captures four ints by value") {
     int a = 0, b = 0, c = 0, d = 0;
     for (auto _ : state) {
         {
-            auto g = on_scope_exit([a, b, c, d]() mutable {
-                DoNotOptimize(a + b + c + d);
-            });
+            auto g = on_scope_exit([a, b, c, d]() mutable { DoNotOptimize(a + b + c + d); });
         }
         DoNotOptimize(a);
     }

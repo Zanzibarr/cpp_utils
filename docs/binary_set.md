@@ -1,5 +1,7 @@
 # binary_set
 
+> All symbols below live in `namespace utilz`; examples assume `using namespace utilz;`.
+
 **File:** [`binary_set/binary_set.hxx`](../binary_set/binary_set.hxx)
 **Dependencies:** none
 **Benchmarks:** [binary_set/BENCHMARKS.md](../binary_set/BENCHMARKS.md)

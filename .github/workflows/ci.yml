@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: gcc-14 (ubuntu)
+            os: ubuntu-24.04
+            cxx: g++-14
+            install: sudo apt-get update && sudo apt-get install -y g++-14
+          - name: clang-18 (ubuntu)
+            os: ubuntu-24.04
+            cxx: clang++-18
+            install: sudo apt-get update && sudo apt-get install -y clang-18
+          - name: apple-clang (macos)
+            os: macos-14
+            cxx: clang++
+            install: ""
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install compiler
+        if: matrix.install != ''
+        run: ${{ matrix.install }}
+
+      - name: Build and run tests
+        run: |
+          set -e
+          mkdir -p build
+          for t in */test.cpp; do
+            d=$(dirname "$t")
+            echo "::group::test $d"
+            ${{ matrix.cxx }} -std=c++20 -O2 -pthread -Wall -Wextra "$t" -o "build/test_$d"
+            "./build/test_$d"
+            echo "::endgroup::"
+          done
+
+      - name: Compile demos and benchmarks (build only)
+        run: |
+          set -e
+          for f in */demo.cpp */benchmarks.cpp; do
+            [ -f "$f" ] || continue
+            echo "::group::compile $f"
+            ${{ matrix.cxx }} -std=c++20 -O2 -pthread -c "$f" -o /dev/null
+            echo "::endgroup::"
+          done
+
+  format:
+    name: clang-format
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check formatting
+        run: clang-format --dry-run --Werror */*.hxx */*.hpp */*.cpp

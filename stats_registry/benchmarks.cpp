@@ -36,6 +36,8 @@
 #include "../benchmarking/bench_main.hpp"
 #include "stats_registry.hxx"
 
+using namespace utilz;
+
 using benchmark::DoNotOptimize;
 using clk = std::chrono::steady_clock;
 

@@ -1,5 +1,7 @@
 # testing
 
+> All symbols below live in `namespace utilz`; examples assume `using namespace utilz;`.
+
 **Files:** [`testing/test_framework.hxx`](../testing/test_framework.hxx), [`testing/test_main.hpp`](../testing/test_main.hpp)
 **Dependencies:** [ansi_colors](ansi_colors.md)
 

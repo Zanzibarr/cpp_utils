@@ -17,6 +17,8 @@
 #include "../testing/test_main.hpp"
 #include "stats_registry.hxx"
 
+using namespace utilz;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2211,9 +2213,7 @@ TEST_CASE("concurrent series_push from multiple threads has correct total count"
 TEST_CASE("series data from exited thread is preserved in report") {
     StatsRegistry reg;
     {
-        std::thread worker([&] {
-            reg.series_push<"sr_exited">(42.0);
-        });
+        std::thread worker([&] { reg.series_push<"sr_exited">(42.0); });
         worker.join();
     }
     const auto pts = reg.series_get<"sr_exited">();
@@ -2224,9 +2224,7 @@ TEST_CASE("series data from exited thread is preserved in report") {
 TEST_CASE("series_reset clears data from exited threads") {
     StatsRegistry reg;
     {
-        std::thread worker([&] {
-            reg.series_push<"sr_exited_reset">(10.0);
-        });
+        std::thread worker([&] { reg.series_push<"sr_exited_reset">(10.0); });
         worker.join();
     }
     reg.series_reset<"sr_exited_reset">();

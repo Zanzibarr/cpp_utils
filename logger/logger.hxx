@@ -52,6 +52,7 @@
 
 #include "../utilities/ansi_colors.hxx"  // TODO: Update to the actual path
 
+namespace utilz {
 // ── LoggerLevel ───────────────────────────────────────────────────────────────
 
 /**
@@ -780,3 +781,5 @@ inline Logger::Logger(config cfg, std::chrono::steady_clock::time_point start)
         start_worker();
     }
 }
+
+}  // namespace utilz

@@ -38,6 +38,7 @@
 #include <string>     // std::string
 #include <vector>     // std::vector
 
+namespace utilz {
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal constants
 // ─────────────────────────────────────────────────────────────────────────────
@@ -748,3 +749,5 @@ class BinarySet {
     std::size_t size_{0};
     std::vector<detail::chunk_t> chunks_;
 };
+
+}  // namespace utilz

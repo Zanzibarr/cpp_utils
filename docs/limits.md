@@ -1,5 +1,7 @@
 # limits
 
+> All symbols below live in `namespace utilz`; examples assume `using namespace utilz;`.
+
 **File:** [`limits/limits.hxx`](../limits/limits.hxx)
 **Dependencies:** none
 

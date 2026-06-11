@@ -1,5 +1,7 @@
 # benchmarking
 
+> All symbols below live in `namespace utilz`; examples assume `using namespace utilz;`.
+
 **Files:** [`benchmarking/benchmark.hxx`](../benchmarking/benchmark.hxx), [`benchmarking/bench_main.hpp`](../benchmarking/bench_main.hpp)
 **Dependencies:** [ansi_colors](ansi_colors.md)
 

@@ -55,6 +55,7 @@
 
 #include "../utilities/ct_string.hxx"  // TODO: Update to the actual path
 
+namespace utilz {
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -990,4 +991,6 @@ inline auto global_timers() -> TimerRegistry& {
     return inst;
 }
 
-#define TIMER_REG global_timers()
+#define TIMER_REG ::utilz::global_timers()
+
+}  // namespace utilz

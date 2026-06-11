@@ -1,5 +1,7 @@
 # logger
 
+> All symbols below live in `namespace utilz`; examples assume `using namespace utilz;`.
+
 **File:** [`logger/logger.hxx`](../logger/logger.hxx)
 **Dependencies:** [ansi_colors](ansi_colors.md)
 **Benchmarks:** [logger/BENCHMARKS.md](../logger/BENCHMARKS.md)

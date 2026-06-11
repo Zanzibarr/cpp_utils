@@ -1,5 +1,7 @@
 # ansi_colors
 
+> All symbols below live in `namespace utilz`; examples assume `using namespace utilz;`.
+
 **File:** [`utilities/ansi_colors.hxx`](../utilities/ansi_colors.hxx)
 **Dependencies:** none
 

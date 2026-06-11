@@ -1,5 +1,7 @@
 # argparser
 
+> All symbols below live in `namespace utilz`; examples assume `using namespace utilz;`.
+
 **File:** [`argparser/argparser.hxx`](../argparser/argparser.hxx)
 **Dependencies:** [parameters](parameters.md) → [ct_string](ct_string.md)
 **Benchmarks:** [argparser/BENCHMARKS.md](../argparser/BENCHMARKS.md)

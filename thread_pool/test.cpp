@@ -7,6 +7,8 @@
 #include "../testing/test_main.hpp"
 #include "../thread_pool/thread_pool.hxx"
 
+using namespace utilz;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Basic submit
 // ─────────────────────────────────────────────────────────────────────────────
@@ -288,15 +290,13 @@ TEST_CASE("submit_each on a vector resolves all futures with correct values") {
     ThreadPool pool{4};
     std::vector<int> data{1, 2, 3, 4, 5};
     auto futs = pool.submit_each(data.begin(), data.end(), [](int x) { return x * x; });
-    for (std::size_t i = 0; i < data.size(); ++i)
-        expect(futs[i].get()).to_equal(data[static_cast<int>(i)] * data[static_cast<int>(i)]);
+    for (std::size_t i = 0; i < data.size(); ++i) expect(futs[i].get()).to_equal(data[static_cast<int>(i)] * data[static_cast<int>(i)]);
 }
 
 TEST_CASE("submit_n(100, f) yields futures[i].get() == i*i") {
     ThreadPool pool{4};
     auto futs = pool.submit_n(100, [](std::size_t i) { return i * i; });
-    for (std::size_t i = 0; i < 100; ++i)
-        expect(futs[i].get()).to_equal(i * i);
+    for (std::size_t i = 0; i < 100; ++i) expect(futs[i].get()).to_equal(i * i);
 }
 
 TEST_CASE("submit_each priority variant enqueues and resolves") {

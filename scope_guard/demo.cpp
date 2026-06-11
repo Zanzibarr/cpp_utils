@@ -2,6 +2,8 @@
 
 #include "scope_guard.hxx"
 
+using namespace utilz;
+
 void simulate_database_work(bool triggerError) {
     std::cout << "\n--- Starting Transaction (Error: " << (triggerError ? "YES" : "NO") << ") ---\n";
 

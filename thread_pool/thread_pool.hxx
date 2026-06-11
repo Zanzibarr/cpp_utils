@@ -55,6 +55,7 @@
 #include <tuple>
 #include <vector>
 
+namespace utilz {
 // ── Priority ──────────────────────────────────────────────────────────────────
 
 /**
@@ -559,3 +560,5 @@ class ThreadPool {
     std::mutex wait_mutex_;
     std::condition_variable wait_cv_;
 };
+
+}  // namespace utilz

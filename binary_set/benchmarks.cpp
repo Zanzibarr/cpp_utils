@@ -43,6 +43,8 @@
 #include "../benchmarking/bench_main.hpp"
 #include "binary_set.hxx"
 
+using namespace utilz;
+
 using benchmark::DoNotOptimize;
 
 // ─────────────────────────────────────────────────────────────────────────────

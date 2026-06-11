@@ -3,6 +3,8 @@
 
 #include "interval.hxx"
 
+using namespace utilz;
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 static void section(const char* title) {
     std::cout << "\n╔══════════════════════════════════════╗\n";

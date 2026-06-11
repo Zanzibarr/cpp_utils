@@ -49,6 +49,7 @@
 
 #include "../timer/timer.hxx"  // TODO: Update to the actual path
 
+namespace utilz {
 // ─────────────────────────────────────────────────────────────────────────────
 // Internal helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -955,4 +956,6 @@ inline auto global_stats() -> StatsRegistry& {
     return inst;
 }
 
-#define STATS_REG global_stats()
+#define STATS_REG ::utilz::global_stats()
+
+}  // namespace utilz

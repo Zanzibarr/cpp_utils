@@ -26,6 +26,8 @@
 
 #include "logger.hxx"
 
+using namespace utilz;
+
 // ── Shared state ──────────────────────────────────────────────────────────────
 
 std::atomic<int> requests_handled{0};

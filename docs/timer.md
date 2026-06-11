@@ -1,5 +1,7 @@
 # timer
 
+> All symbols below live in `namespace utilz`; examples assume `using namespace utilz;`.
+
 **File:** [`timer/timer.hxx`](../timer/timer.hxx)
 **Dependencies:** [ct_string](ct_string.md)
 

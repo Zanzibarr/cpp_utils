@@ -53,6 +53,7 @@
 
 #include "../parameters/parameters.hxx"  // TODO: Update to the actual path
 
+namespace utilz {
 namespace cli {
 
 // Supported value types
@@ -744,3 +745,5 @@ inline auto argparser_parse(cli::ArgParser& parser, int argc, char** argv, Callb
         return false;
     }
 }
+
+}  // namespace utilz

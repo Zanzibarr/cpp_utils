@@ -45,6 +45,7 @@
 
 #include "../utilities/ansi_colors.hxx"  // TODO: Update to the actual path
 
+namespace utilz {
 // ─────────────────────────────────────────────────────────────────────────────
 // ANSI colors — thin namespace aliases over the shared ansi:: helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -332,6 +333,8 @@ struct auto_bench_registrar {
 
 }  // namespace benchmark
 
+}  // namespace utilz
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Macro helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -363,11 +366,11 @@ inline const char* _bm_current_suite_ = "<unset>";
 //   BENCH_CASE_NW("my bench", 10000, 100) { for (auto _ : state) { ... } }
 // ─────────────────────────────────────────────────────────────────────────────
 
-#define _BM_DEFINE(test_name, iters, warmup)                                                                                                 \
-    static void _BM_CAT(_bm_fn_, __LINE__)(::benchmark::bench_state & state);                                                                \
-    static ::benchmark::auto_bench_registrar _BM_CAT(_bm_reg_, __LINE__)(_bm_current_suite_, test_name, _BM_CAT(_bm_fn_, __LINE__), (iters), \
-                                                                         (warmup));                                                          \
-    static void _BM_CAT(_bm_fn_, __LINE__)(::benchmark::bench_state & state)
+#define _BM_DEFINE(test_name, iters, warmup)                                                                                                        \
+    static void _BM_CAT(_bm_fn_, __LINE__)(::utilz::benchmark::bench_state & state);                                                                \
+    static ::utilz::benchmark::auto_bench_registrar _BM_CAT(_bm_reg_, __LINE__)(_bm_current_suite_, test_name, _BM_CAT(_bm_fn_, __LINE__), (iters), \
+                                                                                (warmup));                                                          \
+    static void _BM_CAT(_bm_fn_, __LINE__)(::utilz::benchmark::bench_state & state)
 
 #define BENCH_CASE(test_name) _BM_DEFINE(test_name, 1000, 10)
 #define BENCH_CASE_N(test_name, iters) _BM_DEFINE(test_name, iters, 10)

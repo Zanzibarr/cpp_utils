@@ -15,6 +15,8 @@
 #include "../testing/test_main.hpp"
 #include "argparser.hxx"
 
+using namespace utilz;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper — builds argc / argv from an initializer list of string literals.
 // ─────────────────────────────────────────────────────────────────────────────

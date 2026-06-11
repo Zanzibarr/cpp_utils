@@ -1,5 +1,7 @@
 # scope_guard
 
+> All symbols below live in `namespace utilz`; examples assume `using namespace utilz;`.
+
 **File:** [`scope_guard/scope_guard.hxx`](../scope_guard/scope_guard.hxx)
 **Dependencies:** none
 **Benchmarks:** [scope_guard/BENCHMARKS.md](../scope_guard/BENCHMARKS.md)

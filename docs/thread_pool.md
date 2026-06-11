@@ -1,5 +1,7 @@
 # thread_pool
 
+> All symbols below live in `namespace utilz`; examples assume `using namespace utilz;`.
+
 **File:** [`thread_pool/thread_pool.hxx`](../thread_pool/thread_pool.hxx)
 **Dependencies:** — (standard library only; requires C++20)
 

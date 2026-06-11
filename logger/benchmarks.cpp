@@ -17,6 +17,8 @@
 
 #include "logger.hxx"
 
+using namespace utilz;
+
 using enum LoggerLevel;
 using clk = std::chrono::steady_clock;
 

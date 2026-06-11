@@ -21,6 +21,8 @@
 #include "../benchmarking/bench_main.hpp"
 #include "interval.hxx"
 
+using namespace utilz;
+
 using benchmark::DoNotOptimize;
 
 // ─────────────────────────────────────────────────────────────────────────────

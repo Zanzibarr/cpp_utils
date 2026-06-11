@@ -35,6 +35,7 @@
 #include <stdexcept>
 #include <type_traits>
 
+namespace utilz {
 /**
  * Closed interval [min, max] for arithmetic types.
  *
@@ -220,3 +221,5 @@ template <typename T>
 auto operator<<(std::ostream& out, const Interval<T>& inter) -> std::ostream& {
     return out << static_cast<std::string>(inter);
 }
+
+}  // namespace utilz

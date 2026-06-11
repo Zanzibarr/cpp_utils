@@ -1,6 +1,8 @@
 #include "../binary_set/binary_set.hxx"
 #include "../testing/test_main.hpp"
 
+using namespace utilz;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Construction
 // ─────────────────────────────────────────────────────────────────────────────

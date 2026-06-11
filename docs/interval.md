@@ -1,5 +1,7 @@
 # interval
 
+> All symbols below live in `namespace utilz`; examples assume `using namespace utilz;`.
+
 **File:** [`interval/interval.hxx`](../interval/interval.hxx)
 **Dependencies:** none
 **Benchmarks:** [interval/BENCHMARKS.md](../interval/BENCHMARKS.md)

@@ -28,6 +28,7 @@
 #include <cstddef>
 #include <string_view>
 
+namespace utilz {
 /**
  * String literal type usable as a non-type template parameter (C++20).
  *
@@ -82,3 +83,5 @@ consteval auto hash_name(std::string_view str) noexcept -> std::size_t {
     }
     return hash;
 }
+
+}  // namespace utilz
