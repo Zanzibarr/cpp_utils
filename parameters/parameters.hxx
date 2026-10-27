@@ -74,7 +74,7 @@ concept ValidStoredType =
 
 template <std::size_t Hash>
 struct CtParamID {
-    static const std::size_t value;
+    static auto value() -> std::size_t;
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -188,7 +188,7 @@ class ParameterRegistry {
             stored = std::string(std::forward<T>(value));
         }
 
-        const std::size_t idx = CtParamID<hash_name(Name)>::value;
+        const std::size_t idx = CtParamID<hash_name(Name)>::value();
         auto& slot = slots_[idx];
 
         if (slot.active && slot.name != Name.view()) {
@@ -225,7 +225,7 @@ class ParameterRegistry {
      */
     template <CTString Name, typename T>
     [[nodiscard]] auto get() const -> std::conditional_t<std::is_same_v<T, std::string>, const T&, T> {
-        const std::size_t idx = CtParamID<hash_name(Name)>::value;
+        const std::size_t idx = CtParamID<hash_name(Name)>::value();
         const auto& slot = slots_[idx];
         if (!slot.active) {
             throw std::out_of_range(std::format("ParameterRegistry: parameter not set: {}", std::string(Name.view())));
@@ -241,7 +241,7 @@ class ParameterRegistry {
      */
     template <CTString Name>
     [[nodiscard]] auto has() const noexcept -> bool {
-        return slots_[CtParamID<hash_name(Name)>::value].active;
+        return slots_[CtParamID<hash_name(Name)>::value()].active;
     }
 
     /**
@@ -364,12 +364,24 @@ class ParameterRegistry {
 // ─────────────────────────────────────────────────────────────────────────────
 // CtParamID — maps a compile-time hash to a unique sequential parameter index.
 //
-// Instantiated once per unique CTString across the whole program.
-// The static value is assigned on first use via ParameterRegistry::assign_param_id().
+// Instantiated once per unique CTString across the whole program.  The index is
+// assigned on the first call via ParameterRegistry::assign_param_id().
+//
+// A function with a local static, rather than a static data member: the dynamic
+// initialisation of a static data member of an implicitly instantiated template
+// is *unordered* with respect to every other dynamic initialisation in the
+// program ([basic.start.dynamic]).  A registry used before main() - a global, a
+// function-level static, a test body that runs at static-init time - would then
+// read the index before it had been assigned, get 0 for every name, and put them
+// all in the same slot.  A local static is initialised on first call instead,
+// whenever that happens to be, and thread-safely.
 // ─────────────────────────────────────────────────────────────────────────────
 
 template <std::size_t Hash>
-const std::size_t CtParamID<Hash>::value = ParameterRegistry::assign_param_id(Hash);
+auto CtParamID<Hash>::value() -> std::size_t {
+    static const std::size_t id = ParameterRegistry::assign_param_id(Hash);
+    return id;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Global convenience
