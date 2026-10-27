@@ -579,3 +579,117 @@ TEST_CASE("print_help does not throw with string choices") {
     expect_no_throw(parser.print_help());
     std::cout.rdbuf(old);
 }
+// ─────────────────────────────────────────────────────────────────────────────
+// Positional arguments
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_SUITE("positional arguments")
+
+TEST_CASE("positionals are filled in registration order") {
+    cli::ArgParser parser("prog");
+    parser.add<"ap_pos_in", std::string>().positional();
+    parser.add<"ap_pos_out", std::string>().positional();
+    Args args{"prog", "a.txt", "b.txt"};
+    parser.parse(args.argc(), args.argv());
+    std::string in = parser.get<"ap_pos_in", std::string>();
+    std::string out = parser.get<"ap_pos_out", std::string>();
+    expect(in).to_equal(std::string{"a.txt"});
+    expect(out).to_equal(std::string{"b.txt"});
+}
+
+TEST_CASE("positional given as --name is skipped by bare tokens") {
+    cli::ArgParser parser("prog");
+    parser.add<"ap_posn_in", std::string>().positional();
+    parser.add<"ap_posn_out", std::string>().positional();
+    Args args{"prog", "--ap_posn_in", "a.txt", "b.txt"};
+    parser.parse(args.argc(), args.argv());
+    std::string in = parser.get<"ap_posn_in", std::string>();
+    std::string out = parser.get<"ap_posn_out", std::string>();
+    expect(in).to_equal(std::string{"a.txt"});
+    expect(out).to_equal(std::string{"b.txt"});
+}
+
+TEST_CASE("extra bare token throws") {
+    cli::ArgParser parser("prog");
+    parser.add<"ap_pos_extra", std::string>().positional();
+    Args args{"prog", "a", "b"};
+    expect_throws(cli::ParseError, parser.parse(args.argc(), args.argv()));
+}
+
+TEST_CASE("single-digit negative number fills an int positional") {
+    cli::ArgParser parser("prog");
+    parser.add<"ap_pos_neg", int>().positional();
+    Args args{"prog", "-5"};
+    parser.parse(args.argc(), args.argv());
+    int val = parser.get<"ap_pos_neg", int>();
+    expect(val).to_equal(-5);
+}
+
+TEST_CASE("missing required positional reports <name>") {
+    cli::ArgParser parser("prog");
+    parser.add<"ap_pos_req", int>().positional().require();
+    Args args{"prog"};
+    std::string msg;
+    try {
+        parser.parse(args.argc(), args.argv());
+    } catch (const cli::ParseError& e) {
+        msg = e.what();
+    }
+    expect(msg).to_contain("<ap_pos_req>");
+}
+
+TEST_CASE("bare bool flag does not consume a following positional") {
+    cli::ArgParser parser("prog");
+    parser.add<"ap_pos_v", bool>();
+    parser.add<"ap_pos_file", std::string>().positional();
+    Args args{"prog", "--ap_pos_v", "file.txt"};
+    parser.parse(args.argc(), args.argv());
+    bool verbose = parser.get<"ap_pos_v", bool>();
+    std::string file = parser.get<"ap_pos_file", std::string>();
+    expect(verbose).to_be_true();
+    expect(file).to_equal(std::string{"file.txt"});
+}
+
+TEST_CASE("bool flag still takes an explicit literal value") {
+    cli::ArgParser parser("prog");
+    parser.add<"ap_pos_b", bool>();
+    Args args{"prog", "--ap_pos_b", "no"};
+    parser.parse(args.argc(), args.argv());
+    bool val = parser.get<"ap_pos_b", bool>();
+    expect(val).to_be_false();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// set() by runtime name, registry(), default_val write-through
+// ─────────────────────────────────────────────────────────────────────────────
+
+TEST_SUITE("runtime set and registry")
+
+TEST_CASE("set() by runtime name writes the registry") {
+    cli::ArgParser parser("prog");
+    parser.add<"ap_rset_n", int>().min(0).max(10);
+    parser.set(std::string_view{"ap_rset_n"}, 7);
+    int val = parser.registry().get<"ap_rset_n", int>();
+    expect(val).to_equal(7);
+}
+
+TEST_CASE("set() by runtime name validates and rejects unknown names") {
+    cli::ArgParser parser("prog");
+    parser.add<"ap_rset_v", int>().max(10);
+    expect_throws(cli::ParseError, parser.set(std::string_view{"ap_rset_v"}, 11));
+    expect_throws(cli::ParseError, parser.set(std::string_view{"ap_rset_missing"}, 1));
+}
+
+TEST_CASE("default_val is readable without parse()") {
+    cli::ArgParser parser("prog");
+    parser.add<"ap_dwt_n", int>().default_val(3);
+    int val = parser.registry().get<"ap_dwt_n", int>();
+    expect(val).to_equal(3);
+}
+
+TEST_CASE("default outside min/max throws on parse") {
+    cli::ArgParser parser("prog");
+    parser.add<"ap_dbad_n", int>().default_val(50).max(10);
+    Args args{"prog"};
+    expect_throws(cli::ParseError, parser.parse(args.argc(), args.argv()));
+}

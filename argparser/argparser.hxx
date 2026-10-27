@@ -34,6 +34,7 @@
  */
 
 #include <algorithm>
+#include <cctype>
 #include <concepts>
 #include <cstdlib>
 #include <format>
@@ -85,6 +86,8 @@ struct Arg {
 
     std::function<void(const Value&)> setter;  // populates the ParameterRegistry on parse()
 
+    bool isPositional = false;  // filled from a bare token rather than from --name
+
     // ── fluent builders ────────────────────────────────────────────────
 
     /**
@@ -115,9 +118,29 @@ struct Arg {
         return *this;
     }
 
+    /**
+     * Marks the argument as positional: it is filled from a bare token — one that is
+     * neither `--name` nor `-x` — instead of from a flag.  Positional arguments are
+     * consumed in registration order, and keep their long name for `--help`, for the
+     * TOML config file, and for `set()`.
+     */
+    auto positional(bool on = true) -> Arg& {
+        isPositional = on;
+        return *this;
+    }
+
+    /**
+     * Sets the value used when the argument is not given.
+     *
+     * The value is written through to the `ParameterRegistry` immediately, not only
+     * when `parse()` runs, so that a caller who never touches a command line - a
+     * library configuring itself through `set()` alone - still reads the declared
+     * default rather than an unset parameter.
+     */
     template <typename T>
     auto default_val(T value) -> Arg& {
         defaultValue = normalize_and_store(value);
+        setter(*defaultValue);
         return *this;
     }
 
@@ -249,15 +272,22 @@ class ArgParser {
      */
     template <CTString Name, typename T>
     auto set(T value) -> void {
-        const std::string name_str{Name.view()};
-        Arg* arg = find_arg(name_str);
-        if (arg == nullptr) {
-            throw ParseError(std::format("unknown argument: --{}", name_str));
-        }
-        Value normalized = arg->normalize_and_store(value);
-        validate(*arg, normalized);
-        parsed_[name_str] = normalized;
-        arg->setter(normalized);
+        set_impl(std::string{Name.view()}, value);
+    }
+
+    /**
+     * Manually sets a parameter value by runtime name, bypassing the CLI.
+     *
+     * The compile-time overload above exists so that a caller who knows the name at
+     * compile time cannot misspell it.  This one is for the callers who do not: a
+     * plugin system where the name is assembled at runtime, or a binding layer.  Both
+     * go through the same `validate()`, so `min`/`max`/`allow` hold either way.
+     *
+     * @throws ParseError if the parameter is not registered.
+     */
+    template <typename T>
+    auto set(std::string_view name, T value) -> void {
+        set_impl(std::string{name}, value);
     }
 
     /**
@@ -306,6 +336,14 @@ class ArgParser {
     /** Returns a copy of the `ParameterRegistry` populated by `parse()`. */
     [[nodiscard]] auto parameters() const -> ParameterRegistry { return reg_; }
 
+    /**
+     * Returns the `ParameterRegistry` itself, for a caller that reads parameters for as
+     * long as the parser is alive and does not want a copy of the slot array per read.
+     * `set()` and `parse()` write through it in place; it is valid until the parser is
+     * destroyed or moved.
+     */
+    [[nodiscard]] auto registry() const -> const ParameterRegistry& { return reg_; }
+
     // ── help ───────────────────────────────────────────────────────────
 
     /** Prints formatted usage and option descriptions to stdout. */
@@ -321,7 +359,13 @@ class ArgParser {
             return left;
         };
 
-        std::cout << "Usage: " << programName_ << " [options]\n";
+        std::cout << "Usage: " << programName_ << " [options]";
+        for (const auto& arg : args_) {
+            if (arg.isPositional) {
+                std::cout << (arg.required ? std::format(" <{}>", arg.name) : std::format(" [{}]", arg.name));
+            }
+        }
+        std::cout << '\n';
         if (!description_.empty()) {
             std::cout << description_ << "\n";
         }
@@ -330,7 +374,7 @@ class ArgParser {
         std::cout << pad_left("  -C, --config <file>") << "Load parameters from a TOML config file\n";
 
         for (const auto& arg : args_) {
-            std::string left = "  --" + arg.name;
+            std::string left = arg.isPositional ? "  " + arg.name : "  --" + arg.name;
             if (arg.shortName != 0) {
                 left += std::format(", -{}", arg.shortName);
             }
@@ -399,6 +443,18 @@ class ArgParser {
         }
     }
 
+    template <typename T>
+    void set_impl(const std::string& name_str, T value) {
+        Arg* arg = find_arg(name_str);
+        if (arg == nullptr) {
+            throw ParseError(std::format("unknown argument: --{}", name_str));
+        }
+        Value normalized = arg->normalize_and_store(value);
+        validate(*arg, normalized);
+        parsed_[name_str] = normalized;
+        arg->setter(normalized);
+    }
+
     auto find_arg(const std::string& key) -> Arg* {
         if (!name_map_.empty()) {
             auto name_iter = name_map_.find(key);
@@ -407,6 +463,18 @@ class ArgParser {
         // Pre-parse fallback used during registration (add() duplicate check, set()).
         for (auto& arg : args_) {
             if (arg.name == key) {
+                return &arg;
+            }
+        }
+        return nullptr;
+    }
+
+    // The positional argument at `cursor`, advancing it past the one returned. Positionals
+    // already given as `--name` are skipped. Null once every positional has been filled.
+    auto next_positional_arg(std::size_t& cursor, const std::unordered_set<std::string>& seen) -> Arg* {
+        while (cursor < args_.size()) {
+            Arg& arg = args_[cursor++];
+            if (arg.isPositional && !seen.contains(arg.name)) {
                 return &arg;
             }
         }
@@ -426,9 +494,11 @@ class ArgParser {
     void parse_impl(std::span<char*> argv_span) {
         build_lookup_maps();
 
-        // 1. Seed defaults
+        // 1. Seed defaults. Validated here rather than in default_val(), since min/max/allow
+        //    may be declared after it in the builder chain.
         for (auto& arg : args_) {
             if (arg.defaultValue) {
+                validate(arg, *arg.defaultValue);
                 parsed_[arg.name] = *arg.defaultValue;
             }
         }
@@ -460,7 +530,7 @@ class ArgParser {
         // 4. Check required
         for (const auto& arg : args_) {
             if (arg.required && !parsed_.contains(arg.name)) {
-                throw ParseError(std::format("required argument missing: --{}", arg.name));
+                throw ParseError(std::format("required argument missing: {}", display_name(arg)));
             }
         }
 
@@ -477,6 +547,7 @@ class ArgParser {
 
     void parse_cli_arguments(const std::vector<std::string>& remaining) {
         std::unordered_set<std::string> seen_cli;
+        std::size_t next_positional = 0;
         for (std::size_t i = 0; i < remaining.size(); ++i) {
             const auto& tok = remaining[i];
 
@@ -488,10 +559,20 @@ class ArgParser {
             std::string key;
             if (tok.starts_with("--")) {
                 key = tok.substr(2);
-            } else if (tok.starts_with("-") && tok.size() == 2) {
+            } else if (tok.starts_with("-") && tok.size() == 2 && !is_negative_digit(tok)) {
                 key = expand_short(tok[1]);
             } else {
-                throw ParseError(std::format("unexpected token: {}", tok));
+                // A bare token fills the next argument registered as positional. The
+                // value is taken from the token itself, so the shared flag path below -
+                // which reads the value from the token after it - is not used here.
+                Arg* slot = next_positional_arg(next_positional, seen_cli);
+                if (slot == nullptr) {
+                    throw ParseError(std::format("unexpected token: {}", tok));
+                }
+                seen_cli.insert(slot->name);
+                parsed_[slot->name] = parse_value(*slot, tok);
+                validate(*slot, parsed_[slot->name]);
+                continue;
             }
 
             Arg* arg = find_arg(key);
@@ -509,9 +590,13 @@ class ArgParser {
     }
 
     void process_cli_value(const Arg& arg, const std::string& key, const std::vector<std::string>& remaining, std::size_t& index) {
-        // bool flags may be used without a value
+        // bool flags may be used without a value. The next token is only taken as
+        // that value when it actually reads as one: anything else is a token in its
+        // own right - the next flag, or a positional argument - and a bare bool flag
+        // means true. Without that check `prog --verbose file.txt` would consume the
+        // path as the value of --verbose and then report it as an invalid bool.
         if (arg.type == typeid(bool)) {
-            if (index + 1 < remaining.size() && !remaining[index + 1].starts_with("-")) {
+            if (index + 1 < remaining.size() && is_bool_literal(remaining[index + 1])) {
                 parsed_[key] = parse_bool(remaining[++index]);
             } else {
                 parsed_[key] = true;
@@ -597,6 +682,19 @@ class ArgParser {
     }
 
     // ── helpers ────────────────────────────────────────────────────────
+
+    /** `--name` for a flag, `<name>` for a positional — how errors refer to `arg`. */
+    static auto display_name(const Arg& arg) -> std::string { return arg.isPositional ? std::format("<{}>", arg.name) : "--" + arg.name; }
+
+    /** True for `-N` (single digit) not registered as a short flag: a negative number. */
+    auto is_negative_digit(const std::string& tok) const -> bool {
+        return std::isdigit(static_cast<unsigned char>(tok[1])) != 0 && !short_map_.contains(tok[1]);
+    }
+
+    /** True when `str` is one of the spellings parse_bool() accepts. */
+    static auto is_bool_literal(const std::string& str) -> bool {
+        return str == "true" || str == "1" || str == "yes" || str == "false" || str == "0" || str == "no";
+    }
 
     static auto parse_bool(const std::string& str) -> bool {
         if (str == "true" || str == "1" || str == "yes") {
