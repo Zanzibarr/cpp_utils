@@ -1,7 +1,5 @@
 # cpp_utils
 
-[![CI](https://github.com/Zanzibarr/cpp_utils/actions/workflows/ci.yml/badge.svg)](https://github.com/Zanzibarr/cpp_utils/actions/workflows/ci.yml)
-
 Header-only C++20 utilities for performance-sensitive projects. Each utility lives in its own folder, has no external dependencies, and can be used standalone or alongside others.
 
 ## Namespace
